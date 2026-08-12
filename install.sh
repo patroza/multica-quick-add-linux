@@ -10,14 +10,22 @@ WALKER_CONFIG="${HOME}/.config/walker/config.toml"
 mkdir -p "$BIN_DIR" "$ELEPHANT_MENUS"
 
 ln -sfn "$ROOT/bin/multica-quick-add" "$BIN_DIR/multica-quick-add"
-chmod +x "$ROOT/bin/multica-quick-add"
+chmod +x "$ROOT/bin/multica-quick-add" "$ROOT/bin/multica-quick-add"
 
-ln -sfn "$ROOT/elephant/menus/multicaquickadd.lua" "$ELEPHANT_MENUS/multicaquickadd.lua"
+# Hub + submenus + shared helpers
+for f in \
+  _multica_common.lua \
+  multicaquickadd.lua \
+  multicaworkspace.lua \
+  multicaproject.lua \
+  multicacreatedby.lua
+do
+  ln -sfn "$ROOT/elephant/menus/$f" "$ELEPHANT_MENUS/$f"
+done
 
 # Walker: ensure the menu provider is listed (idempotent)
 if [[ -f "$WALKER_CONFIG" ]]; then
   if ! grep -q 'menus:multicaquickadd' "$WALKER_CONFIG"; then
-    # Insert into installed_providers array if present
     if grep -q 'installed_providers' "$WALKER_CONFIG"; then
       tmp="$(mktemp)"
       awk '
@@ -57,20 +65,19 @@ cat <<EOF
 
 Installed:
   $BIN_DIR/multica-quick-add
-  $ELEPHANT_MENUS/multicaquickadd.lua
+  hub:     $ELEPHANT_MENUS/multicaquickadd.lua
+  menus:   workspace · project · created-by (+ _multica_common.lua)
 
 Usage:
-  multica-quick-add              # prompt with last agent
-  multica-quick-add --pick       # reselect workspace/project/agent
-  multica-quick-add --configure  # save defaults only
+  multica-quick-add --hub          # open Multica hub (recommended)
+  multica-quick-add                # capture with last selection
   walker -m menus:multicaquickadd
-  Type prefix "mqa" in Walker
+  type prefix: mqa
 
-Suggested niri bind (Ctrl+Shift+M — Multica):
-  Ctrl+Shift+M { spawn-sh "multica-quick-add"; }
-
-  Or exclusive menu:
-  Ctrl+Shift+M { spawn-sh "omarchy-launch-walker -m menus:multicaquickadd"; }
+Suggested niri bind:
+  Super+Shift+Space {
+    spawn-sh "multica-quick-add --hub";
+  }
 
 Requires Multica CLI login:
   multica setup

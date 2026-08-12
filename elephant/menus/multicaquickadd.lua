@@ -1,162 +1,171 @@
--- Multica Quick Add menu for Elephant / Walker
--- Lists agents and squads; activating one opens a free-text prompt and
--- submits Multica quick-create (same path as bin/multica-quick-add).
+-- Multica Quick Add — hub
+-- Shows current workspace / project / agent and opens submenus to change them.
+-- Primary action: capture a prompt with the current selection.
 
 local home = os.getenv("HOME") or ""
-local state_dir = (os.getenv("XDG_STATE_HOME") or (home .. "/.local/state")) .. "/multica-quick-add"
-
--- Resolve CLI without host-specific paths. Prefer PATH / install symlink;
--- optional override: MULTICA_QUICK_ADD=/path/to/bin/multica-quick-add
-local script = os.getenv("MULTICA_QUICK_ADD") or ""
-if script == "" then
+local this_dir = home .. "/.config/elephant/menus"
+-- Prefer sibling next to this script when running from a repo checkout symlink.
+do
+  local candidates = {
+    home .. "/.config/elephant/menus/_multica_common.lua",
+  }
   local which = io.popen("command -v multica-quick-add 2>/dev/null")
   if which then
-    script = (which:read("*l") or ""):gsub("%s+$", "")
+    local bin = (which:read("*l") or ""):gsub("%s+$", "")
     which:close()
+    if bin ~= "" then
+      local root = io.popen("readlink -f " .. bin .. " 2>/dev/null | xargs dirname | xargs dirname")
+      if root then
+        local r = (root:read("*l") or ""):gsub("%s+$", "")
+        root:close()
+        if r ~= "" then
+          table.insert(candidates, 1, r .. "/elephant/menus/_multica_common.lua")
+        end
+      end
+    end
   end
-end
-if script == "" then
-  script = home .. "/.local/bin/multica-quick-add"
+  local common_path = nil
+  for _, p in ipairs(candidates) do
+    local f = io.open(p, "r")
+    if f then
+      f:close()
+      common_path = p
+      break
+    end
+  end
+  if not common_path then
+    error("multica: missing _multica_common.lua (run install.sh)")
+  end
+  common = dofile(common_path)
 end
 
 Name = "multicaquickadd"
-NamePretty = "Multica Quick Add"
+NamePretty = "Multica"
 Icon = "mail-message-new"
-Description = "Capture a thought → Multica agent (quick-create)"
-Cache = true
-RefreshOnChange = { state_dir .. "/cache" }
+Description = "Quick-create issues for Multica agents"
+Cache = false
+RefreshOnChange = { common.state_dir }
 SearchName = true
 FixedOrder = true
 HideFromProviderlist = false
-History = true
-HistoryWhenEmpty = true
-
-local function shell_quote(s)
-  return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
-end
-
-local function read_cmd(cmd)
-  local h = io.popen(cmd)
-  if not h then
-    return nil
-  end
-  local data = h:read("*a")
-  h:close()
-  if not data or data == "" then
-    return nil
-  end
-  return data
-end
-
-local function latest_catalog_path()
-  local data = read_cmd("ls -1t " .. state_dir .. "/cache/catalog.*.json 2>/dev/null | head -1")
-  if not data then
-    return nil
-  end
-  return data:gsub("%s+$", "")
-end
+History = false
+HistoryWhenEmpty = false
+Keywords = { "multica", "quick", "issue", "agent", "mqa" }
 
 function GetEntries()
   local entries = {}
+  local sel = common.selection() or {}
+  local ready = sel.ready == true or sel.ready == "true"
+  local ws = sel.workspace_name or "—"
+  local proj = sel.project_title or "No project"
+  local agent = sel.created_by_name or "Not set"
+  local hint = sel.hint or ""
+  local err = sel.error
 
-  table.insert(entries, {
-    Text = "⚙ Configure defaults…",
-    Subtext = "workspace · project · agent",
-    Value = "configure",
-    Actions = {
-      open = "lua:Configure",
-    },
-  })
+  -- Warm catalog in background when we have a workspace
+  if sel.workspace_id and sel.workspace_id ~= "" then
+    common.run_bg(common.shell_quote(common.script()) .. " --refresh --no-notify")
+  end
 
-  table.insert(entries, {
-    Text = "✏ Capture with last agent…",
-    Subtext = "reuse last-used Multica selection",
-    Value = "capture",
-    Actions = {
-      open = "lua:CaptureLast",
-    },
-  })
-
-  -- Warm catalog (writes cache). Ignore failures (not logged in).
-  os.execute(shell_quote(script) .. " --refresh >/dev/null 2>&1")
-
-  local catalog_path = latest_catalog_path()
-  if not catalog_path or catalog_path == "" then
+  -- 1) Capture (primary)
+  if ready then
     table.insert(entries, {
-      Text = "Not logged in / no cache",
-      Subtext = "run: multica setup",
-      Value = "login",
+      Text = "✦ Capture",
+      Subtext = hint ~= "" and hint or (agent .. " · " .. proj),
+      Value = "capture",
+      Icon = common.icon_capture(),
+      Keywords = { "capture", "new", "send", "prompt", "issue" },
       Actions = {
-        open = "notify-send 'Multica Quick Add' 'Run multica setup, then reopen this menu'",
+        open = "lua:Capture",
       },
     })
-    return entries
+  else
+    table.insert(entries, {
+      Text = "✦ Capture",
+      Subtext = err or "Choose an agent first",
+      Value = "capture-disabled",
+      Icon = common.icon_capture(),
+      Keywords = { "capture" },
+      Actions = {
+        open = "lua:NeedAgent",
+      },
+    })
   end
 
-  -- agents: id\tname
-  local agents = read_cmd(
-    "jq -r '(.agents // [])[] | [.id, (.name // .id)] | @tsv' " .. shell_quote(catalog_path) .. " 2>/dev/null"
-  )
-  if agents then
-    for line in agents:gmatch("[^\r\n]+") do
-      local id, name = line:match("([^\t]+)\t(.*)")
-      if id then
-        table.insert(entries, {
-          Text = "🤖 " .. (name or id),
-          Subtext = "agent · quick-create",
-          Value = "agent:" .. id,
-          Keywords = { "multica", "agent", name or id },
-          Actions = {
-            open = "lua:CaptureAgent",
-          },
-        })
-      end
-    end
-  end
+  -- 2) Workspace
+  table.insert(entries, {
+    Text = "🏢  Workspace",
+    Subtext = ws,
+    Value = "workspace",
+    Icon = common.icon_workspace(),
+    Keywords = { "workspace", "org", ws },
+    Submenu = "multicaworkspace",
+  })
 
-  local squads = read_cmd(
-    "jq -r '(.squads // [])[] | [.id, (.name // .id)] | @tsv' " .. shell_quote(catalog_path) .. " 2>/dev/null"
-  )
-  if squads then
-    for line in squads:gmatch("[^\r\n]+") do
-      local id, name = line:match("([^\t]+)\t(.*)")
-      if id then
-        table.insert(entries, {
-          Text = "👥 " .. (name or id),
-          Subtext = "squad · quick-create",
-          Value = "squad:" .. id,
-          Keywords = { "multica", "squad", name or id },
-          Actions = {
-            open = "lua:CaptureSquad",
-          },
-        })
-      end
-    end
+  -- 3) Project
+  table.insert(entries, {
+    Text = "📁  Project",
+    Subtext = proj,
+    Value = "project",
+    Icon = common.icon_project(),
+    Keywords = { "project", proj },
+    Submenu = "multicaproject",
+  })
+
+  -- 4) Agent / squad
+  local agent_icon = (sel.created_by_kind == "squad") and common.icon_squad() or common.icon_agent()
+  local agent_label = "🤖  Send to"
+  if sel.created_by_kind == "squad" then
+    agent_label = "👥  Send to"
+  end
+  table.insert(entries, {
+    Text = agent_label,
+    Subtext = agent,
+    Value = "createdby",
+    Icon = agent_icon,
+    Keywords = { "agent", "squad", "assignee", agent },
+    Submenu = "multicacreatedby",
+  })
+
+  -- 5) Refresh
+  table.insert(entries, {
+    Text = "↻  Refresh catalog",
+    Subtext = "Reload projects, agents, and squads",
+    Value = "refresh",
+    Icon = "view-refresh",
+    Keywords = { "refresh", "reload", "sync" },
+    Actions = {
+      open = "lua:Refresh",
+    },
+  })
+
+  if not sel.workspace_id or sel.workspace_id == "" then
+    table.insert(entries, {
+      Text = "⚠  Not configured",
+      Subtext = "Run multica login, then pick a workspace",
+      Value = "login",
+      Icon = "dialog-warning",
+      Actions = {
+        open = "notify-send 'Multica Quick Add' 'Run: multica setup   then open this hub again'",
+      },
+    })
   end
 
   return entries
 end
 
-function Configure(_value, _args, _query)
-  os.execute(shell_quote(script) .. " --configure &")
+function Capture(_value, _args, _query)
+  common.capture()
 end
 
-function CaptureLast(_value, _args, _query)
-  os.execute(shell_quote(script) .. " &")
+function NeedAgent(_value, _args, _query)
+  os.execute(
+    "notify-send 'Multica Quick Add' 'Pick an agent or squad under Send to, then Capture again'"
+  )
 end
 
-function CaptureAgent(value, _args, _query)
-  local id = tostring(value or ""):gsub("^agent:", "")
-  if id == "" then
-    return
-  end
-  os.execute(shell_quote(script) .. " --agent-id " .. shell_quote(id) .. " &")
-end
-
-function CaptureSquad(value, _args, _query)
-  local id = tostring(value or ""):gsub("^squad:", "")
-  if id == "" then
-    return
-  end
-  os.execute(shell_quote(script) .. " --squad-id " .. shell_quote(id) .. " &")
+function Refresh(_value, _args, _query)
+  common.run_bg(common.shell_quote(common.script()) .. " --refresh")
+  os.execute("notify-send 'Multica Quick Add' 'Refreshing catalog…'")
+  common.run_bg(common.shell_quote(common.script()) .. " --hub")
 end

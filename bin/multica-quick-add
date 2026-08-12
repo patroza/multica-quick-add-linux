@@ -2,8 +2,7 @@
 # Multica Quick Add — Walker/Elephant (Linux) fork of
 # https://github.com/tim-smart/multica-quick-add
 #
-# Global-hotkey style capture: free-text prompt → Multica quick-create API.
-# Default: reuse last workspace / project / agent. Use --pick to reselect.
+# Global-hotkey capture + Elephant hub for workspace/project/agent selection.
 
 set -euo pipefail
 
@@ -25,16 +24,27 @@ Multica Quick Add (Walker / Elephant)
 
 USAGE
   multica-quick-add [flags] [prompt...]
+  multica-quick-add --hub
   multica-quick-add --pick
-  multica-quick-add --configure
-  multica-quick-add --refresh
+  multica-quick-add --print-selection
+  multica-quick-add --set-workspace-id ID
+  multica-quick-add --set-project-id ID   # empty / __none__ clears
+  multica-quick-add --set-agent-id ID
+  multica-quick-add --set-squad-id ID
 
 FLAGS
-  --pick                 Force workspace / project / agent pickers
-  --configure            Only update last-used selections (no submit)
+  --hub                  Open the Elephant/Walker Multica hub
+  --pick                 Force workspace / project / agent pickers (CLI wizard)
+  --configure            Interactive pickers; save only (no submit)
   --refresh              Refresh Multica catalog cache for current workspace
-  --workspace-id ID      Override workspace
-  --project-id ID        Override project (empty string clears)
+  --print-selection      JSON of current workspace/project/created-by
+  --set-workspace-id ID  Save workspace selection (no submit)
+  --set-project-id ID    Save project (empty or __none__ = no project)
+  --set-agent-id ID      Save created-by agent
+  --set-squad-id ID      Save created-by squad
+  --reopen-hub           After --set-*, reopen the Multica hub
+  --workspace-id ID      Override workspace for this run
+  --project-id ID        Override project for this run
   --agent-id ID          Submit as this agent
   --squad-id ID          Submit as this squad
   --created-by NAME      Fuzzy name match against agents then squads
@@ -42,11 +52,10 @@ FLAGS
   --no-notify            Print result to stdout instead of notify-send
   -h, --help             Show this help
 
-FLOW
-  1. Resolve workspace (last used, config default, or picker)
-  2. Unless overrides given, reuse last project + created-by for that workspace
-  3. Capture prompt via Walker input-only dmenu (or argv / stdin)
-  4. POST /api/issues/quick-create and notify
+HUB
+  Open with:  multica-quick-add --hub
+              walker -m menus:multicaquickadd
+              type prefix mqa in Walker
 
 Requires: multica CLI logged in, walker, jq, curl, notify-send.
 EOF
@@ -56,6 +65,14 @@ PICK=0
 CONFIGURE=0
 REFRESH=0
 NO_NOTIFY=0
+HUB=0
+PRINT_SELECTION=0
+REOPEN_HUB=0
+SET_WORKSPACE_ID=""
+SET_PROJECT_ID=""
+SET_PROJECT=0
+SET_AGENT_ID=""
+SET_SQUAD_ID=""
 WORKSPACE_ID=""
 PROJECT_ID=""
 PROJECT_ID_SET=0
@@ -71,6 +88,10 @@ while [[ $# -gt 0 ]]; do
       usage
       exit 0
       ;;
+    --hub)
+      HUB=1
+      shift
+      ;;
     --pick)
       PICK=1
       shift
@@ -82,6 +103,31 @@ while [[ $# -gt 0 ]]; do
       ;;
     --refresh)
       REFRESH=1
+      shift
+      ;;
+    --print-selection)
+      PRINT_SELECTION=1
+      shift
+      ;;
+    --set-workspace-id)
+      SET_WORKSPACE_ID="${2:?}"
+      shift 2
+      ;;
+    --set-project-id)
+      SET_PROJECT=1
+      SET_PROJECT_ID="${2-}"
+      shift 2
+      ;;
+    --set-agent-id)
+      SET_AGENT_ID="${2:?}"
+      shift 2
+      ;;
+    --set-squad-id)
+      SET_SQUAD_ID="${2:?}"
+      shift 2
+      ;;
+    --reopen-hub)
+      REOPEN_HUB=1
       shift
       ;;
     --workspace-id)
@@ -128,9 +174,77 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-mqa_require_cmd multica jq curl
+mqa_require_cmd jq
 mqa_ensure_dirs
-mqa_load_config
+
+# Hub does not need Multica auth just to open the UI.
+if [[ "$HUB" == "1" ]]; then
+  mqa_open_hub
+  exit 0
+fi
+
+# Soft config load for selection helpers (menus still work offline of API with cache).
+_mqa_config_ok=0
+if [[ -f "$MQA_CONFIG_PATH" ]]; then
+  if mqa_load_config 2>/dev/null; then
+    _mqa_config_ok=1
+  fi
+fi
+
+# --- pure selection mutations (Elephant submenus) ---
+if [[ -n "$SET_WORKSPACE_ID" || "$SET_PROJECT" == "1" || -n "$SET_AGENT_ID" || -n "$SET_SQUAD_ID" ]]; then
+  mqa_require_cmd multica curl
+  [[ "$_mqa_config_ok" == "1" ]] || mqa_die "Not logged in. Run multica login first."
+  if [[ -n "$SET_WORKSPACE_ID" ]]; then
+    mqa_set_workspace "$SET_WORKSPACE_ID"
+  fi
+  if [[ "$SET_PROJECT" == "1" ]]; then
+    mqa_set_project "" "$SET_PROJECT_ID"
+  fi
+  if [[ -n "$SET_AGENT_ID" ]]; then
+    mqa_set_created_by agent "$SET_AGENT_ID" ""
+  fi
+  if [[ -n "$SET_SQUAD_ID" ]]; then
+    mqa_set_created_by squad "$SET_SQUAD_ID" ""
+  fi
+  if [[ "$NO_NOTIFY" != "1" ]]; then
+    sel="$(mqa_print_selection)"
+    name="$(jq -r '.created_by_name // "—"' <<<"$sel")"
+    proj="$(jq -r '.project_title // "No project"' <<<"$sel")"
+    ws="$(jq -r '.workspace_name // "—"' <<<"$sel")"
+    mqa_notify "Multica selection" "$ws · $proj · $name"
+  fi
+  if [[ "$REOPEN_HUB" == "1" ]]; then
+    mqa_reopen_hub
+  fi
+  if [[ "$NO_NOTIFY" == "1" ]]; then
+    mqa_print_selection
+  fi
+  exit 0
+fi
+
+if [[ "$PRINT_SELECTION" == "1" ]]; then
+  if [[ "$_mqa_config_ok" != "1" ]]; then
+    jq -n '{
+      ready: false,
+      error: "not logged in",
+      workspace_id: "",
+      workspace_name: "",
+      project_id: "",
+      project_title: "No project",
+      created_by_kind: "",
+      created_by_id: "",
+      created_by_name: "Not set",
+      hint: "Run multica login"
+    }'
+    exit 0
+  fi
+  mqa_print_selection
+  exit 0
+fi
+
+mqa_require_cmd multica curl
+[[ "$_mqa_config_ok" == "1" ]] || mqa_die "Not logged in. Run multica login first."
 
 # --- resolve workspace ---
 if [[ -z "$WORKSPACE_ID" ]]; then
@@ -143,7 +257,6 @@ fi
 # Bare --refresh must never open interactive pickers (Elephant warms cache this way).
 if [[ "$REFRESH" == "1" && "$CONFIGURE" != "1" && "$PICK" != "1" && ${#PROMPT_ARGS[@]} -eq 0 && -t 0 ]]; then
   if [[ -z "$WORKSPACE_ID" ]]; then
-    # First workspace from CLI if any
     WORKSPACE_ID="$(mqa_list_workspaces | jq -r '.[0].id // empty' 2>/dev/null || true)"
   fi
   if [[ -z "$WORKSPACE_ID" ]]; then
@@ -176,7 +289,6 @@ if [[ "$REFRESH" == "1" ]]; then
   catalog="$(mqa_get_catalog "$WORKSPACE_ID" 1)"
 else
   catalog="$(mqa_get_catalog "$WORKSPACE_ID" 0)"
-  # Soft refresh in background for next open
   (mqa_get_catalog "$WORKSPACE_ID" 1 >/dev/null 2>&1 || true) &
 fi
 
@@ -186,7 +298,6 @@ if [[ "$PROJECT_ID_SET" != "1" ]]; then
 fi
 if [[ "$PICK" == "1" ]]; then
   mapfile -t project_lines < <(printf '%s' "$catalog" | mqa_project_lines)
-  # Optional: allow "no project" (sentinel id; never send as project_id).
   project_lines=("— No project"$'\t'"__none__" "${project_lines[@]+"${project_lines[@]}"}")
   picked="$(mqa_pick_id_from_labeled "Multica project (optional)" "${project_lines[@]}")" || true
   PROJECT_ID="$(mqa_normalize_project_id "${picked:-}")"
@@ -224,7 +335,6 @@ else
     mapfile -t cb_lines < <(printf '%s' "$catalog" | mqa_created_by_lines)
     [[ ${#cb_lines[@]} -gt 0 ]] || mqa_die "No agents or squads in this workspace."
     line="$(mqa_pick_line "Send to agent / squad" "${cb_lines[@]}")" || mqa_die "Cancelled."
-    # "label\tkind\tid"
     CREATED_BY_KIND="$(printf '%s' "$line" | cut -f2)"
     CREATED_BY_ID="$(printf '%s' "$line" | cut -f3)"
     CREATED_BY_NAME_RESOLVED="$(printf '%s' "$line" | cut -f1 | sed 's/^[🤖👥] //')"
@@ -235,7 +345,6 @@ else
   fi
 fi
 
-# Resolve display name if missing
 if [[ -z "$CREATED_BY_NAME_RESOLVED" ]]; then
   CREATED_BY_NAME_RESOLVED="$(
     printf '%s' "$catalog" | jq -r --arg k "$CREATED_BY_KIND" --arg id "$CREATED_BY_ID" '
@@ -267,7 +376,6 @@ PROMPT=""
 if [[ ${#PROMPT_ARGS[@]} -gt 0 ]]; then
   PROMPT="${PROMPT_ARGS[*]}"
 elif [[ ! -t 0 ]]; then
-  # stdin if piped
   PROMPT="$(cat)"
   PROMPT="$(printf '%s' "$PROMPT" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 fi
@@ -286,7 +394,6 @@ if [[ -z "$PROMPT" ]]; then
 fi
 
 # --- attachments ---
-# Note: never use "${arr[@]:-}" — with an empty array bash iterates once with "".
 attachment_ids=()
 if ((${#ATTACHMENTS[@]} > 0)); then
   for path in "${ATTACHMENTS[@]}"; do

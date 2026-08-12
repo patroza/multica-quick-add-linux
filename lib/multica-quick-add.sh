@@ -109,32 +109,33 @@ mqa_ensure_dirs() {
 
 mqa_load_config() {
   # Exports: MQA_SERVER_URL, MQA_TOKEN, MQA_WORKSPACE_ID (optional default)
+  # Returns 0 on success, 1 if missing/invalid (no notify when used as soft check).
   if [[ ! -f "$MQA_CONFIG_PATH" ]]; then
-    mqa_die "Not logged in. Run \"multica setup\" first (expected $MQA_CONFIG_PATH)."
+    return 1
   fi
 
   local parsed
   parsed="$(
     jq -r '
-      def emptyish: . == null or . == "";
       [
         (.server_url // .serverURL // ""),
         (.token // .access_token // .accessToken // ""),
         (.workspace_id // .workspaceID // "")
       ] | @tsv
-    ' "$MQA_CONFIG_PATH"
-  )" || mqa_die "Could not parse $MQA_CONFIG_PATH"
+    ' "$MQA_CONFIG_PATH" 2>/dev/null
+  )" || return 1
 
   IFS=$'\t' read -r MQA_SERVER_URL MQA_TOKEN MQA_DEFAULT_WORKSPACE_ID <<<"$parsed"
   export MQA_SERVER_URL MQA_TOKEN MQA_DEFAULT_WORKSPACE_ID
 
   if [[ -z "${MQA_SERVER_URL:-}" || -z "${MQA_TOKEN:-}" ]]; then
-    mqa_die "Not logged in. Run \"multica login\" / \"multica setup\" first."
+    return 1
   fi
 
   # Strip trailing slash
   MQA_SERVER_URL="${MQA_SERVER_URL%/}"
   export MQA_SERVER_URL
+  return 0
 }
 
 mqa_state_get() {
@@ -433,4 +434,171 @@ mqa_project_lines() {
 
 mqa_workspace_lines() {
   jq -r '.[] | "\(.name // .id)\t\(.id)"'
+}
+
+# --- Selection API (Elephant hub / submenus) ---
+
+mqa_resolve_workspace_id() {
+  local id="${1:-}"
+  if [[ -z "$id" ]]; then
+    id="$(mqa_state_get last_workspace_id)"
+  fi
+  if [[ -z "$id" && -n "${MQA_DEFAULT_WORKSPACE_ID:-}" ]]; then
+    id="$MQA_DEFAULT_WORKSPACE_ID"
+  fi
+  printf '%s' "$id"
+}
+
+mqa_workspace_name() {
+  local id="$1"
+  mqa_list_workspaces 2>/dev/null | jq -r --arg id "$id" \
+    '(.[] | select(.id == $id) | .name) // $id' 2>/dev/null || printf '%s' "$id"
+}
+
+mqa_print_selection() {
+  local workspace_id project_id kind cb_id cb_name project_title ready catalog
+  workspace_id="$(mqa_resolve_workspace_id "")"
+  if [[ -z "$workspace_id" ]]; then
+    jq -n '{
+      ready: false,
+      error: "no workspace selected",
+      workspace_id: "",
+      workspace_name: "",
+      project_id: "",
+      project_title: "",
+      created_by_kind: "",
+      created_by_id: "",
+      created_by_name: "",
+      hint: "Pick a workspace first"
+    }'
+    return 0
+  fi
+
+  project_id="$(mqa_normalize_project_id "$(mqa_state_get "last_project_id.$workspace_id")")"
+  kind="$(mqa_state_get "last_created_by_kind.$workspace_id")"
+  cb_id="$(mqa_state_get "last_created_by_id.$workspace_id")"
+  cb_name="$(mqa_state_get "last_created_by_name.$workspace_id")"
+
+  catalog="$(mqa_get_catalog "$workspace_id" 0 2>/dev/null || printf '{}')"
+  project_title=""
+  if [[ -n "$project_id" ]]; then
+    project_title="$(
+      printf '%s' "$catalog" | jq -r --arg id "$project_id" \
+        '((.projects // [])[] | select(.id == $id) | .title // .name) // empty' 2>/dev/null || true
+    )"
+  fi
+  if [[ -z "$cb_name" && -n "$cb_id" ]]; then
+    cb_name="$(
+      printf '%s' "$catalog" | jq -r --arg k "${kind:-agent}" --arg id "$cb_id" '
+        if $k == "squad" then
+          ((.squads // [])[] | select(.id == $id) | .name) // $id
+        else
+          ((.agents // [])[] | select(.id == $id) | .name) // $id
+        end
+      ' 2>/dev/null || printf '%s' "$cb_id"
+    )"
+  fi
+
+  local ws_name
+  ws_name="$(mqa_workspace_name "$workspace_id")"
+  ready=false
+  [[ -n "$cb_id" && -n "$kind" ]] && ready=true
+
+  local hint="→ ${cb_name:-pick agent}"
+  if [[ -n "$project_title" ]]; then
+    hint="$hint · $project_title"
+  elif [[ -n "$project_id" ]]; then
+    hint="$hint · project"
+  else
+    hint="$hint · no project"
+  fi
+
+  jq -n \
+    --arg workspace_id "$workspace_id" \
+    --arg workspace_name "$ws_name" \
+    --arg project_id "$project_id" \
+    --arg project_title "${project_title:-}" \
+    --arg created_by_kind "${kind:-}" \
+    --arg created_by_id "${cb_id:-}" \
+    --arg created_by_name "${cb_name:-}" \
+    --arg hint "$hint" \
+    --argjson ready "$ready" \
+    '{
+      ready: $ready,
+      workspace_id: $workspace_id,
+      workspace_name: $workspace_name,
+      project_id: $project_id,
+      project_title: (if $project_title == "" then (if $project_id == "" then "No project" else $project_id end) else $project_title end),
+      created_by_kind: $created_by_kind,
+      created_by_id: $created_by_id,
+      created_by_name: (if $created_by_name == "" then "Not set" else $created_by_name end),
+      hint: $hint
+    }'
+}
+
+mqa_set_workspace() {
+  local id="${1:?workspace id required}"
+  mqa_state_set last_workspace_id "$id"
+  mqa_get_catalog "$id" 1 >/dev/null 2>&1 || true
+  # Touch selections so Elephant RefreshOnChange fires even if catalog unchanged
+  touch "$MQA_STATE_DIR/selections.json" 2>/dev/null || true
+}
+
+mqa_set_project() {
+  local workspace_id project_id
+  workspace_id="$(mqa_resolve_workspace_id "${1:-}")"
+  [[ -n "$workspace_id" ]] || mqa_die "No workspace selected"
+  project_id="$(mqa_normalize_project_id "${2-}")"
+  mqa_state_set "last_project_id.$workspace_id" "$project_id"
+  touch "$MQA_STATE_DIR/selections.json" 2>/dev/null || true
+}
+
+mqa_set_created_by() {
+  local kind="${1:?}" id="${2:?}" name="${3:-}"
+  local workspace_id
+  workspace_id="$(mqa_resolve_workspace_id "")"
+  [[ -n "$workspace_id" ]] || mqa_die "No workspace selected"
+  if [[ -z "$name" ]]; then
+    local catalog
+    catalog="$(mqa_get_catalog "$workspace_id" 0 2>/dev/null || printf '{}')"
+    name="$(
+      printf '%s' "$catalog" | jq -r --arg k "$kind" --arg id "$id" '
+        if $k == "squad" then
+          ((.squads // [])[] | select(.id == $id) | .name) // $id
+        else
+          ((.agents // [])[] | select(.id == $id) | .name) // $id
+        end
+      ' 2>/dev/null || printf '%s' "$id"
+    )"
+  fi
+  mqa_state_set "last_created_by_kind.$workspace_id" "$kind"
+  mqa_state_set "last_created_by_id.$workspace_id" "$id"
+  mqa_state_set "last_created_by_name.$workspace_id" "$name"
+  touch "$MQA_STATE_DIR/selections.json" 2>/dev/null || true
+}
+
+mqa_open_hub() {
+  mqa_ensure_walker_service
+  # Prefer exclusive Multica hub; fall back to elephant menu protocol.
+  if command -v walker >/dev/null 2>&1; then
+    # Don't --exit; keep normal provider session for browsing hub/submenus.
+    walker -m menus:multicaquickadd --width 720 --minheight 280 --maxheight 480 &
+  elif command -v elephant >/dev/null 2>&1; then
+    elephant menu multicaquickadd &
+  else
+    mqa_die "walker (or elephant) is required to open the Multica hub"
+  fi
+}
+
+mqa_reopen_hub() {
+  # Bounce back to hub after a submenu selection (best-effort).
+  if command -v elephant >/dev/null 2>&1; then
+    elephant menu multicaquickadd >/dev/null 2>&1 || true
+  fi
+  if command -v walker >/dev/null 2>&1; then
+    # Close any transient dmenu, then show hub
+    walker --close >/dev/null 2>&1 || true
+    sleep 0.05
+    walker -m menus:multicaquickadd --width 720 --minheight 280 --maxheight 480 >/dev/null 2>&1 &
+  fi
 }
