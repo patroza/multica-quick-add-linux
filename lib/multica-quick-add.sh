@@ -579,10 +579,12 @@ mqa_set_created_by() {
 
 mqa_open_hub() {
   mqa_ensure_walker_service
-  # Prefer exclusive Multica hub; fall back to elephant menu protocol.
+  # Do NOT use walker -m (exclusive provider): menus:open / elephant menu
+  # switches to child menus (workspace/project/agent) are ignored while exclusive.
+  # Use a provider *set* so the hub is default but children can still display.
   if command -v walker >/dev/null 2>&1; then
-    # Don't --exit; keep normal provider session for browsing hub/submenus.
-    walker -m menus:multicaquickadd --width 720 --minheight 280 --maxheight 480 &
+    walker -s multica --width 720 --minheight 280 --maxheight 520 \
+      --placeholder "Type an issue…  (ctrl+w workspace · ctrl+p project · ctrl+t agent)" &
   elif command -v elephant >/dev/null 2>&1; then
     elephant menu multicaquickadd &
   else
@@ -592,7 +594,6 @@ mqa_open_hub() {
 
 mqa_reopen_hub() {
   # Bounce back to hub after a submenu selection (best-effort, single shot).
-  # Prefer Elephant's menu protocol so we don't spawn stacked Walker clients.
   if command -v elephant >/dev/null 2>&1; then
     elephant menu multicaquickadd >/dev/null 2>&1 || true
     return 0
@@ -600,6 +601,6 @@ mqa_reopen_hub() {
   if command -v walker >/dev/null 2>&1; then
     walker --close >/dev/null 2>&1 || true
     sleep 0.05
-    walker -m menus:multicaquickadd --width 720 --minheight 280 --maxheight 480 >/dev/null 2>&1 &
+    mqa_open_hub
   fi
 }
