@@ -477,7 +477,7 @@ ShellRoot {
                         }
 
                         Text {
-                            text: root.busy ? "Working…" : "Enter to send · Esc to dismiss · Shift+Enter for newline"
+                            text: root.busy ? "Working…" : "⌘/Ctrl+Enter to send · Esc to dismiss · Enter for newline"
                             color: root.textDim
                             font.pixelSize: 11
                             font.family: "Inter, system-ui, sans-serif"
@@ -521,7 +521,12 @@ ShellRoot {
                                 if (event.key === Qt.Key_Escape) {
                                     root.hidePanel();
                                     event.accepted = true;
-                                } else if (event.key === Qt.Key_Return && !(event.modifiers & Qt.ShiftModifier)) {
+                                    return;
+                                }
+                                // Enter = newline. Submit only with Ctrl/Cmd/Super+Enter
+                                // (Toshy: Cmd often surfaces as Meta/Super or Ctrl depending on remap).
+                                const submitMod = event.modifiers & (Qt.ControlModifier | Qt.MetaModifier | Qt.SuperModifier);
+                                if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && submitMod) {
                                     root.submit();
                                     event.accepted = true;
                                 }

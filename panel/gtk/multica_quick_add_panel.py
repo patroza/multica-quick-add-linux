@@ -171,7 +171,7 @@ class MulticaPanel(Adw.Application):
         titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         t1 = Gtk.Label(label="Quick Add", xalign=0)
         t1.add_css_class("mqa-header-title")
-        t2 = Gtk.Label(label="GTK comparison · Enter to send · Esc to dismiss", xalign=0)
+        t2 = Gtk.Label(label="GTK · ⌘/Ctrl+Enter to send · Esc dismiss · Enter newline", xalign=0)
         t2.add_css_class("mqa-header-sub")
         titles.append(t1)
         titles.append(t2)
@@ -258,7 +258,13 @@ class MulticaPanel(Adw.Application):
         if keyval == Gdk.KEY_Escape:
             self.quit()
             return True
-        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and not (state & Gdk.ModifierType.SHIFT_MASK):
+        # Enter = newline. Submit only with Ctrl/Cmd/Super+Enter.
+        submit_mod = (
+            Gdk.ModifierType.CONTROL_MASK
+            | Gdk.ModifierType.META_MASK
+            | Gdk.ModifierType.SUPER_MASK
+        )
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and (state & submit_mod):
             self._on_send(None)
             return True
         return False

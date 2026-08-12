@@ -57,7 +57,7 @@ mqa-bootstrap   # full JSON for panel UIs
 
 - Type in the text field (characters echo live)
 - Choose workspace / project / agent-or-squad
-- **Enter** or **Send** submits; **Esc** dismisses
+- **⌘/Ctrl+Enter** or **Send** submits; plain **Enter** is a newline; **Esc** dismisses
 - Remembers last selection under `~/.local/state/multica-quick-add/`
 
 IPC (daemon must be running):
