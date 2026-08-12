@@ -3,8 +3,9 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
+import Quickshell.Wayland
 
-// Multica Quick Add — Quickshell floating panel (Tim-style, dark glass).
+// Multica Quick Add — Quickshell layer-shell panel (Tim-style).
 // Daemon: qs -c multica-quick-add -n -d
 // Toggle: qs -c multica-quick-add ipc call panel toggle
 
@@ -19,7 +20,6 @@ ShellRoot {
     readonly property color textDim: "#6c6c80"
     readonly property color accent: "#89b4fa"
     readonly property color danger: "#f38ba8"
-    readonly property color success: "#a6e3a1"
     readonly property color chip: "#22222e"
 
     property var bootstrap: ({
@@ -36,16 +36,18 @@ ShellRoot {
     property var createdByModel: []
     property string statusText: ""
     property bool statusIsError: true
-    property bool busy: false
+    // Separate busy flags so bootstrap cannot unlock an in-flight send
+    property bool bootstrapBusy: false
+    property bool submitBusy: false
+    property bool busy: bootstrapBusy || submitBusy
     property int bootGen: 0
-    // Suppress persist while restoring combos from bootstrap
+    property int submitGen: 0
+    property string submitText: ""
     property bool applyingSelection: false
-    // First successful bootstrap finished — UI models are warm
     property bool readyOnce: false
-    // Show only after bootstrap so combos/draft don't flash empty→full
     property bool revealPending: false
-    // In-memory draft so reopen is instant (disk is the durable copy)
     property string lastDraft: ""
+    property string pendingWorkspaceId: ""
 
     function homeBin(name) {
         const home = Quickshell.env("HOME") || "";
@@ -69,6 +71,21 @@ ShellRoot {
         return (list || []).join("\u0001");
     }
 
+    function anyComboPopupOpen() {
+        return workspaceBox.popup.visible || projectBox.popup.visible || createdByBox.popup.visible;
+    }
+
+    function handleEscape() {
+        if (anyComboPopupOpen()) {
+            workspaceBox.popup.close();
+            projectBox.popup.close();
+            createdByBox.popup.close();
+            focusPrompt();
+            return;
+        }
+        hidePanel();
+    }
+
     function revealPanel() {
         if (!panel.visible)
             panel.visible = true;
@@ -81,33 +98,39 @@ ShellRoot {
             focusPrompt();
             return;
         }
-        // Warm path: models + draft already stable — show immediately, refresh quietly
         if (root.readyOnce && root.bootstrap.ok) {
             if (promptField)
                 promptField.text = root.lastDraft;
-            statusText = "";
+            if (!root.submitBusy)
+                statusText = "";
             revealPanel();
-            reloadBootstrap(true);
+            reloadBootstrap(true, "");
             return;
         }
-        // Cold path: load first, then show (no empty flash)
         root.revealPending = true;
-        reloadBootstrap(false);
+        reloadBootstrap(false, "");
     }
 
     function hidePanel() {
-        // Keep unsaved prompt as draft (cleared only on successful send)
+        // Save draft; do NOT clear submitBusy — an in-flight send must finish cleanly
         const text = promptField ? promptField.text : "";
-        root.lastDraft = text;
-        saveDraft(text);
+        if (!root.submitBusy) {
+            root.lastDraft = text;
+            saveDraft(text);
+            if (promptField)
+                promptField.text = "";
+            statusText = "";
+            statusIsError = true;
+        } else {
+            // Keep draft of what was being sent; UI can reopen with lastDraft
+            root.lastDraft = root.submitText || text;
+            saveDraft(root.lastDraft);
+            if (promptField)
+                promptField.text = "";
+        }
         panel.visible = false;
         root.revealPending = false;
-        if (promptField)
-            promptField.text = "";
-        statusText = "";
-        statusIsError = true;
-        busy = false;
-        // Leave combo models intact so the next open is already populated
+        root.bootstrapBusy = false;
     }
 
     function saveDraft(text) {
@@ -138,13 +161,14 @@ ShellRoot {
         statusIsError = isError !== false;
     }
 
-    // quiet=true: background refresh while panel already shows stable content
-    function reloadBootstrap(quiet) {
+    // quiet=true: background refresh; workspaceId optional catalog target
+    function reloadBootstrap(quiet, workspaceId) {
         const isQuiet = quiet === true;
+        const ws = workspaceId || "";
         if (!isQuiet && !root.readyOnce)
             setStatus("Loading…", false);
         if (!isQuiet)
-            busy = true;
+            root.bootstrapBusy = true;
         bootGen += 1;
         const gen = bootGen;
         bootstrapProc.quiet = isQuiet;
@@ -152,7 +176,10 @@ ShellRoot {
         Qt.callLater(() => {
             if (gen !== root.bootGen)
                 return;
-            bootstrapProc.command = ["/usr/bin/env", "-u", "BASH_ENV", homeBin("mqa-bootstrap")];
+            let cmd = ["/usr/bin/env", "-u", "BASH_ENV", homeBin("mqa-bootstrap")];
+            if (ws)
+                cmd = cmd.concat(["--workspace-id", ws]);
+            bootstrapProc.command = cmd;
             bootstrapProc.running = true;
         });
     }
@@ -214,7 +241,6 @@ ShellRoot {
         const nextProj = ["No project"].concat(projects.map(p => p.title || p.id));
         const nextCb = agents.map(a => "Agent · " + (a.name || a.id)).concat(squads.map(s => "Squad · " + (s.name || s.id)));
 
-        // Assign directly — never blank to [] first (that flashes empty rows).
         if (modelKey(root.workspaceModel) !== modelKey(nextWs))
             root.workspaceModel = nextWs;
         if (modelKey(root.projectModel) !== modelKey(nextProj))
@@ -229,6 +255,7 @@ ShellRoot {
                 break;
             }
         }
+        wi = Math.min(wi, Math.max(0, root.workspaceModel.length - 1));
 
         let pi = 0;
         if (sel.project_id) {
@@ -239,6 +266,7 @@ ShellRoot {
                 }
             }
         }
+        pi = Math.min(pi, Math.max(0, root.projectModel.length - 1));
 
         let ci = 0;
         if (sel.created_by_kind === "agent" && sel.created_by_id) {
@@ -256,23 +284,18 @@ ShellRoot {
                 }
             }
         }
+        ci = Math.min(ci, Math.max(0, root.createdByModel.length - 1));
 
-        const applyIdx = () => {
-            if (workspaceBox.currentIndex !== wi)
-                workspaceBox.currentIndex = wi;
-            if (projectBox.currentIndex !== pi)
-                projectBox.currentIndex = pi;
-            const cbi = Math.min(ci, Math.max(0, root.createdByModel.length - 1));
-            if (createdByBox.currentIndex !== cbi)
-                createdByBox.currentIndex = cbi;
+        Qt.callLater(() => {
+            workspaceBox.currentIndex = wi;
+            projectBox.currentIndex = pi;
+            createdByBox.currentIndex = ci;
             root.applyingSelection = false;
-        };
-        // One frame later so ComboBox has bound the new model when it changed.
-        Qt.callLater(applyIdx);
+        });
     }
 
     function persistSelection() {
-        if (root.applyingSelection || !root.bootstrap.ok)
+        if (root.applyingSelection || !root.bootstrap.ok || root.submitBusy)
             return;
         const ws = selectedWorkspaceId();
         if (!ws)
@@ -292,7 +315,39 @@ ShellRoot {
         });
     }
 
+    function onWorkspaceActivated() {
+        if (root.applyingSelection || root.submitBusy)
+            return;
+        const ws = selectedWorkspaceId();
+        if (!ws)
+            return;
+        // Never persist stale project/agent under a newly selected workspace.
+        // Reload catalog for this workspace first; selection restore uses saved per-ws state.
+        root.pendingWorkspaceId = ws;
+        setStatus("Loading workspace…", false);
+        root.bootstrapBusy = true;
+        // Clear dependent models immediately so we cannot submit wrong IDs
+        root.applyingSelection = true;
+        root.projectModel = ["No project"];
+        root.createdByModel = [];
+        projectBox.currentIndex = 0;
+        createdByBox.currentIndex = 0;
+        Qt.callLater(() => {
+            root.applyingSelection = false;
+        });
+        // Persist workspace only (empty project/agent until catalog lands)
+        const bin = root.homeBin("multica-quick-add");
+        persistProc.command = ["/usr/bin/env", "-u", "BASH_ENV", bin, "--no-notify", "--set-workspace-id", ws, "--set-project-id", ""];
+        persistProc.running = false;
+        Qt.callLater(() => {
+            persistProc.running = true;
+        });
+        reloadBootstrap(false, ws);
+    }
+
     function submit() {
+        if (root.submitBusy || root.bootstrapBusy)
+            return;
         const prompt = promptField.text.trim();
         if (!prompt) {
             setStatus("Type an issue first", true);
@@ -308,21 +363,26 @@ ShellRoot {
             setStatus("Pick an agent or squad", true);
             return;
         }
-        busy = true;
+        root.submitBusy = true;
+        root.submitGen += 1;
+        const gen = root.submitGen;
+        root.submitText = prompt;
         setStatus("Sending…", false);
-        // CLI submit path also writes project/agent into selections.json
         const proj = selectedProjectId();
         const bin = root.homeBin("multica-quick-add");
+        // "--" so prompts starting with "-" are never parsed as flags
         let cmd = ["/usr/bin/env", "-u", "BASH_ENV", bin, "--no-notify", "--workspace-id", ws, "--project-id", proj || ""];
         if (cb.kind === "squad")
             cmd = cmd.concat(["--squad-id", cb.id]);
         else
             cmd = cmd.concat(["--agent-id", cb.id]);
-        cmd.push(prompt);
+        cmd = cmd.concat(["--", prompt]);
+        submitProc.generation = gen;
         submitProc.command = cmd;
         submitProc.running = false;
         Qt.callLater(() => {
-            submitProc.running = true;
+            if (submitProc.generation === gen)
+                submitProc.running = true;
         });
     }
 
@@ -333,17 +393,10 @@ ShellRoot {
         enabled: !root.busy
         font.pixelSize: 13
         font.family: "Inter, system-ui, sans-serif"
-        // After picking, return focus to the prompt so Esc dismisses the panel
-        // instead of being eaten by the combo.
         onActivated: root.focusPrompt()
         Keys.onPressed: event => {
             if (event.key === Qt.Key_Escape) {
-                if (combo.popup.visible) {
-                    combo.popup.close();
-                    root.focusPrompt();
-                } else {
-                    root.hidePanel();
-                }
+                root.handleEscape();
                 event.accepted = true;
             }
         }
@@ -420,6 +473,10 @@ ShellRoot {
     IpcHandler {
         target: "panel"
 
+        function ping(): string {
+            return "ok";
+        }
+
         function toggle(): string {
             root.togglePanel();
             return panel.visible ? "open" : "closed";
@@ -444,7 +501,7 @@ ShellRoot {
         stdout: StdioCollector {
             waitForEnd: true
             onStreamFinished: {
-                root.busy = false;
+                root.bootstrapBusy = false;
                 const raw = text.trim();
                 if (!raw) {
                     if (!bootstrapProc.quiet)
@@ -464,13 +521,15 @@ ShellRoot {
                             root.createdByModel = [];
                         }
                     } else {
-                        if (!bootstrapProc.quiet || !root.statusIsError)
+                        if (!root.submitBusy)
                             root.setStatus("", false);
                         root.applySelectionToCombos();
-                        // Prefer in-memory lastDraft when reopening; else disk draft from bootstrap
-                        if (typeof data.draft === "string")
-                            root.lastDraft = data.draft;
-                        if (promptField && (!promptField.text || promptField.text.length === 0)) {
+                        // Do not clobber in-memory draft while a send is in flight
+                        if (!root.submitBusy && typeof data.draft === "string") {
+                            if (!root.lastDraft)
+                                root.lastDraft = data.draft;
+                        }
+                        if (promptField && !root.submitBusy && (!promptField.text || promptField.text.length === 0)) {
                             if (root.lastDraft && root.lastDraft.length > 0)
                                 promptField.text = root.lastDraft;
                         }
@@ -479,8 +538,8 @@ ShellRoot {
                         else if (!(data.agents || []).length && !(data.squads || []).length)
                             root.setStatus("No agents/squads in workspace", true);
                         root.readyOnce = true;
+                        root.pendingWorkspaceId = "";
                     }
-                    // Reveal only after models/draft applied — no empty→full flash
                     if (root.revealPending)
                         root.revealPanel();
                     else if (panel.visible)
@@ -497,16 +556,15 @@ ShellRoot {
             waitForEnd: true
         }
         onExited: code => {
-            root.busy = false;
-            if (code !== 0 && !root.statusText && !bootstrapProc.quiet)
+            root.bootstrapBusy = false;
+            if (code !== 0 && !root.statusText && !bootstrapProc.quiet && !root.submitBusy)
                 root.setStatus("Bootstrap failed (is multica logged in?)", true);
             if (root.revealPending && code !== 0)
                 root.revealPanel();
         }
     }
 
-    // Warm catalog + draft at daemon start so the first hotkey open is already stable
-    Component.onCompleted: reloadBootstrap(true)
+    Component.onCompleted: reloadBootstrap(true, "")
 
     Process {
         id: persistProc
@@ -522,6 +580,7 @@ ShellRoot {
 
     Process {
         id: submitProc
+        property int generation: 0
         running: false
         command: ["true"]
         stdout: StdioCollector {
@@ -530,29 +589,32 @@ ShellRoot {
         stderr: StdioCollector {
             waitForEnd: true
             onStreamFinished: {
+                if (submitProc.generation !== root.submitGen)
+                    return;
                 if (text && text.trim())
                     root.setStatus(text.trim().replace(/^error:\s*/i, ""), true);
             }
         }
         onExited: code => {
-            root.busy = false;
+            if (submitProc.generation !== root.submitGen)
+                return;
+            root.submitBusy = false;
             if (code === 0) {
-                const msg = promptField.text.trim();
-                notifyProc.command = ["notify-send", "--app-name=Multica Quick Add", "Sent", msg.substring(0, 120)];
+                const sent = root.submitText;
+                notifyProc.command = ["notify-send", "--app-name=Multica Quick Add", "Sent", sent.substring(0, 120)];
                 notifyProc.running = false;
                 Qt.callLater(() => {
                     notifyProc.running = true;
                 });
-                promptField.text = "";
+                // Only clear UI text if it still matches what we sent (or panel is hidden)
+                if (promptField && (promptField.text.trim() === sent || !panel.visible))
+                    promptField.text = "";
                 root.lastDraft = "";
-                root.setStatus("", false);
                 root.clearDraft();
-                // Skip draft save on successful send
+                root.setStatus("", false);
                 panel.visible = false;
                 root.revealPending = false;
-                statusText = "";
-                statusIsError = true;
-                busy = false;
+                root.submitText = "";
             } else if (!root.statusText) {
                 root.setStatus("Send failed", true);
             }
@@ -569,8 +631,7 @@ ShellRoot {
         id: draftSaveProc
         property string pendingText: ""
         running: false
-        // Empty draft removes the file so the next open starts blank.
-        command: ["bash", "-c", "mkdir -p \"$(dirname \"$1\")\" && cat > \"$1.tmp\" && if [ ! -s \"$1.tmp\" ]; then rm -f \"$1.tmp\" \"$1\"; else mv \"$1.tmp\" \"$1\"; fi", "bash", root.draftPath()]
+        command: ["bash", "-c", "umask 077; mkdir -m 700 -p \"$(dirname \"$1\")\" && cat > \"$1.tmp\" && if [ ! -s \"$1.tmp\" ]; then rm -f \"$1.tmp\" \"$1\"; else chmod 600 \"$1.tmp\" && mv -f \"$1.tmp\" \"$1\"; fi", "bash", root.draftPath()]
         stdinEnabled: true
         onStarted: {
             draftSaveProc.write(draftSaveProc.pendingText);
@@ -584,224 +645,255 @@ ShellRoot {
         command: ["rm", "-f", root.draftPath()]
     }
 
-    FloatingWindow {
+    // Layer-shell overlay: floats above windows on niri/Hyprland; OnDemand keyboard focus.
+    // Full-width transparent strip with centered card + click-outside dismiss.
+    PanelWindow {
         id: panel
-        title: "Multica Quick Add"
         visible: false
-        implicitWidth: 720
-        implicitHeight: 268
-        minimumSize: Qt.size(560, 220)
         color: "transparent"
+        implicitHeight: 360
+        exclusiveZone: 0
+        exclusionMode: ExclusionMode.Ignore
 
-        onClosed: root.hidePanel()
+        WlrLayershell.namespace: "multica-quick-add"
+        WlrLayershell.layer: WlrLayer.Overlay
+        WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
 
-        // Window-level Esc: dismiss even when a ComboBox still has focus
-        // (dropdowns otherwise swallow Escape after a project/agent pick).
-        Shortcut {
-            sequence: "Escape"
-            context: Qt.WindowShortcut
-            onActivated: root.hidePanel()
+        anchors {
+            top: true
+            left: true
+            right: true
         }
 
-        // Soft outer glow / shadow stack
-        Rectangle {
-            anchors.fill: parent
-            anchors.margins: 2
-            radius: 20
-            color: "#40000000"
-            y: 3
-            z: -1
+        margins {
+            top: 0
         }
 
-        Rectangle {
-            id: chrome
+        // Click outside the card → dismiss
+        MouseArea {
             anchors.fill: parent
-            radius: 18
-            color: root.bg
-            border.color: root.border
-            border.width: 1
+            onClicked: root.hidePanel()
+        }
 
-            // subtle top highlight
-            Rectangle {
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                height: 1
-                radius: 18
-                color: "#22ffffff"
+        Item {
+            id: card
+            width: 720
+            height: 268
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.top: parent.top
+            anchors.topMargin: 96
+
+            // Stop click-through so typing/combos work
+            MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.AllButtons
+                onClicked: {}
+                onPressed: {}
             }
 
-            ColumnLayout {
+            // Soft outer glow
+            Rectangle {
                 anchors.fill: parent
-                anchors.margins: 18
-                spacing: 14
+                anchors.margins: 2
+                radius: 20
+                color: "#40000000"
+                y: 3
+                z: -1
+            }
 
-                // Header
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 10
+            Rectangle {
+                id: chrome
+                anchors.fill: parent
+                radius: 18
+                color: root.bg
+                border.color: root.border
+                border.width: 1
+                focus: true
 
-                    Rectangle {
-                        width: 28
-                        height: 28
-                        radius: 8
-                        color: "#1e3a5f"
-                        border.color: "#2a4a70"
-                        border.width: 1
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "M"
-                            color: root.accent
-                            font.pixelSize: 14
-                            font.bold: true
-                        }
-                    }
-
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 1
-
-                        Text {
-                            text: "Quick Add"
-                            color: root.text
-                            font.pixelSize: 14
-                            font.bold: true
-                            font.family: "Inter, system-ui, sans-serif"
-                        }
-
-                        Text {
-                            text: root.busy ? "Working…" : "⌘/Ctrl+Enter to send · Esc to dismiss · Enter for newline"
-                            color: root.textDim
-                            font.pixelSize: 11
-                            font.family: "Inter, system-ui, sans-serif"
-                        }
+                Keys.onPressed: event => {
+                    if (event.key === Qt.Key_Escape) {
+                        root.handleEscape();
+                        event.accepted = true;
                     }
                 }
 
-                // Prompt card
                 Rectangle {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    Layout.minimumHeight: 88
-                    radius: 14
-                    color: root.bgElevated
-                    border.color: promptField.activeFocus ? root.borderFocus : root.border
-                    border.width: 1
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    height: 1
+                    radius: 18
+                    color: "#22ffffff"
+                }
 
-                    ScrollView {
-                        anchors.fill: parent
-                        anchors.margins: 4
-                        clip: true
-                        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 18
+                    spacing: 14
 
-                        TextArea {
-                            id: promptField
-                            placeholderText: "Describe an issue…"
-                            wrapMode: TextEdit.Wrap
-                            color: root.text
-                            placeholderTextColor: root.textDim
-                            font.pixelSize: 17
-                            font.family: "Inter, system-ui, sans-serif"
-                            background: null
-                            selectByMouse: true
-                            padding: 10
-                            topPadding: 10
-                            leftPadding: 12
-                            rightPadding: 12
-                            bottomPadding: 10
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
 
-                            Keys.onPressed: event => {
-                                if (event.key === Qt.Key_Escape) {
-                                    root.hidePanel();
-                                    event.accepted = true;
-                                    return;
-                                }
-                                // Enter = newline. Submit only with Ctrl/Cmd/Super+Enter
-                                // (Toshy: Cmd often surfaces as Meta/Super or Ctrl depending on remap).
-                                const submitMod = event.modifiers & (Qt.ControlModifier | Qt.MetaModifier | Qt.SuperModifier);
-                                if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && submitMod) {
-                                    root.submit();
-                                    event.accepted = true;
+                        Rectangle {
+                            width: 28
+                            height: 28
+                            radius: 8
+                            color: "#1e3a5f"
+                            border.color: "#2a4a70"
+                            border.width: 1
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "M"
+                                color: root.accent
+                                font.pixelSize: 14
+                                font.bold: true
+                            }
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 1
+
+                            Text {
+                                text: "Quick Add"
+                                color: root.text
+                                font.pixelSize: 14
+                                font.bold: true
+                                font.family: "Inter, system-ui, sans-serif"
+                            }
+
+                            Text {
+                                text: root.submitBusy ? "Sending…" : (root.bootstrapBusy ? "Loading…" : "⌘/Ctrl+Enter to send · Esc to dismiss · Enter for newline")
+                                color: root.textDim
+                                font.pixelSize: 11
+                                font.family: "Inter, system-ui, sans-serif"
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        Layout.minimumHeight: 88
+                        radius: 14
+                        color: root.bgElevated
+                        border.color: promptField.activeFocus ? root.borderFocus : root.border
+                        border.width: 1
+
+                        ScrollView {
+                            anchors.fill: parent
+                            anchors.margins: 4
+                            clip: true
+                            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+                            TextArea {
+                                id: promptField
+                                placeholderText: "Describe an issue…"
+                                wrapMode: TextEdit.Wrap
+                                color: root.text
+                                placeholderTextColor: root.textDim
+                                font.pixelSize: 17
+                                font.family: "Inter, system-ui, sans-serif"
+                                background: null
+                                selectByMouse: true
+                                padding: 10
+                                topPadding: 10
+                                leftPadding: 12
+                                rightPadding: 12
+                                bottomPadding: 10
+                                enabled: !root.submitBusy
+
+                                Keys.onPressed: event => {
+                                    if (event.key === Qt.Key_Escape) {
+                                        root.handleEscape();
+                                        event.accepted = true;
+                                        return;
+                                    }
+                                    const submitMod = event.modifiers & (Qt.ControlModifier | Qt.MetaModifier | Qt.SuperModifier);
+                                    if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && submitMod) {
+                                        root.submit();
+                                        event.accepted = true;
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                // Pickers + send
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 8
-
-                    DarkCombo {
-                        id: workspaceBox
-                        model: root.workspaceModel
-                        enabled: !root.busy && root.workspaceModel.length > 0
-                        Layout.preferredWidth: 1
+                    RowLayout {
                         Layout.fillWidth: true
-                        onActivated: {
-                            root.persistSelection();
-                            root.focusPrompt();
+                        spacing: 8
+
+                        DarkCombo {
+                            id: workspaceBox
+                            model: root.workspaceModel
+                            enabled: !root.busy && root.workspaceModel.length > 0
+                            Layout.preferredWidth: 1
+                            Layout.fillWidth: true
+                            onActivated: {
+                                root.onWorkspaceActivated();
+                                root.focusPrompt();
+                            }
+                        }
+
+                        DarkCombo {
+                            id: projectBox
+                            model: root.projectModel
+                            Layout.preferredWidth: 1
+                            Layout.fillWidth: true
+                            onActivated: {
+                                root.persistSelection();
+                                root.focusPrompt();
+                            }
+                        }
+
+                        DarkCombo {
+                            id: createdByBox
+                            model: root.createdByModel
+                            enabled: !root.busy && root.createdByModel.length > 0
+                            Layout.preferredWidth: 1.2
+                            Layout.fillWidth: true
+                            onActivated: {
+                                root.persistSelection();
+                                root.focusPrompt();
+                            }
+                        }
+
+                        Button {
+                            id: sendBtn
+                            text: root.submitBusy ? "…" : "Send"
+                            enabled: !root.busy
+                            Layout.preferredWidth: 96
+                            Layout.preferredHeight: 36
+                            onClicked: root.submit()
+
+                            contentItem: Text {
+                                text: sendBtn.text
+                                font.pixelSize: 13
+                                font.bold: true
+                                font.family: "Inter, system-ui, sans-serif"
+                                color: sendBtn.enabled ? "#0b1020" : root.textDim
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+
+                            background: Rectangle {
+                                radius: 10
+                                color: !sendBtn.enabled ? root.chip : (sendBtn.down ? "#6a9ad8" : (sendBtn.hovered ? "#9ac0fb" : root.accent))
+                            }
                         }
                     }
 
-                    DarkCombo {
-                        id: projectBox
-                        model: root.projectModel
-                        Layout.preferredWidth: 1
+                    Text {
                         Layout.fillWidth: true
-                        onActivated: {
-                            root.persistSelection();
-                            root.focusPrompt();
-                        }
+                        text: root.statusText
+                        color: root.statusIsError ? root.danger : root.textDim
+                        font.pixelSize: 12
+                        font.family: "Inter, system-ui, sans-serif"
+                        visible: root.statusText.length > 0
+                        elide: Text.ElideRight
                     }
-
-                    DarkCombo {
-                        id: createdByBox
-                        model: root.createdByModel
-                        enabled: !root.busy && root.createdByModel.length > 0
-                        Layout.preferredWidth: 1.2
-                        Layout.fillWidth: true
-                        onActivated: {
-                            root.persistSelection();
-                            root.focusPrompt();
-                        }
-                    }
-
-                    Button {
-                        id: sendBtn
-                        text: root.busy ? "…" : "Send"
-                        enabled: !root.busy
-                        Layout.preferredWidth: 96
-                        Layout.preferredHeight: 36
-                        onClicked: root.submit()
-
-                        contentItem: Text {
-                            text: sendBtn.text
-                            font.pixelSize: 13
-                            font.bold: true
-                            font.family: "Inter, system-ui, sans-serif"
-                            color: sendBtn.enabled ? "#0b1020" : root.textDim
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                        }
-
-                        background: Rectangle {
-                            radius: 10
-                            color: !sendBtn.enabled ? root.chip : (sendBtn.down ? "#6a9ad8" : (sendBtn.hovered ? "#9ac0fb" : root.accent))
-                        }
-                    }
-                }
-
-                Text {
-                    Layout.fillWidth: true
-                    text: root.statusText
-                    color: root.statusIsError ? root.danger : root.textDim
-                    font.pixelSize: 12
-                    font.family: "Inter, system-ui, sans-serif"
-                    visible: root.statusText.length > 0
-                    elide: Text.ElideRight
                 }
             }
         }

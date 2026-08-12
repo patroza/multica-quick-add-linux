@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Emit a single JSON document for Multica panel UIs (Quickshell / GTK).
+# Optional: --workspace-id UUID  to load that workspace's catalog + selection.
 set -euo pipefail
 unset BASH_ENV || true
 
@@ -13,7 +14,26 @@ MQA_ROOT="$(cd -P "$(dirname "$_mqa_src")/.." && pwd)"
 # shellcheck source=../lib/multica-quick-add.sh
 source "$MQA_ROOT/lib/multica-quick-add.sh"
 
+export MQA_NO_NOTIFY=1
 mqa_ensure_dirs
+
+WS_ARG=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --workspace-id)
+      WS_ARG="${2:?}"
+      shift 2
+      ;;
+    -h | --help)
+      printf 'Usage: mqa-bootstrap [--workspace-id UUID]\n'
+      exit 0
+      ;;
+    *)
+      printf 'error: unknown arg: %s\n' "$1" >&2
+      exit 1
+      ;;
+  esac
+done
 
 draft_file="$(mqa_draft_path)"
 draft_args=()
@@ -41,16 +61,21 @@ fi
 mqa_require_cmd multica jq
 
 workspaces="$(mqa_list_workspaces 2>/dev/null || printf '[]')"
-ws_id="$(mqa_resolve_workspace_id "")"
+ws_id="$WS_ARG"
+if [[ -z "$ws_id" ]]; then
+  ws_id="$(mqa_resolve_workspace_id "")"
+fi
 if [[ -z "$ws_id" ]]; then
   ws_id="$(jq -r '.[0].id // empty' <<<"$workspaces")"
-  [[ -n "$ws_id" ]] && mqa_state_set last_workspace_id "$ws_id"
+fi
+if [[ -n "$ws_id" ]]; then
+  # Remember if caller selected a workspace (panel switch)
+  mqa_state_set last_workspace_id "$ws_id"
 fi
 
 catalog="{}"
 if [[ -n "$ws_id" ]]; then
   catalog="$(mqa_get_catalog "$ws_id" 0 2>/dev/null || printf '{}')"
-  # Soft background refresh for next open — disown so parent exit is instant
   (mqa_get_catalog "$ws_id" 1 >/dev/null 2>&1 || true) &
   disown 2>/dev/null || true
 fi
