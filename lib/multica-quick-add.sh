@@ -633,11 +633,16 @@ mqa_open_hub() {
   # Exclusive -m is OK for initial open; child menus use `elephant menu` which
   # switches the active provider. Avoid walker -s (exits on some setups).
   if command -v walker >/dev/null 2>&1; then
-    # close_when_open: toggle if already up, then ensure hub is shown
-    walker -q 2>/dev/null || true
-    walker -m menus:multicaquickadd --width 720 --minheight 280 --maxheight 520 \
-      --placeholder "Multica  ·  pick targets, then Capture" &
-    sleep 0.15
+    # Prefer omarchy launcher when available (correct env / service).
+    if command -v omarchy-launch-walker >/dev/null 2>&1; then
+      omarchy-launch-walker -m menus:multicaquickadd --width 720 --minheight 280 --maxheight 520 \
+        --placeholder "Multica - Capture or change targets" &
+    else
+      walker -m menus:multicaquickadd --width 720 --minheight 280 --maxheight 520 \
+        --placeholder "Multica - Capture or change targets" &
+    fi
+    sleep 0.2
+    # Ensure the Multica menu is active (works even if -m exclusive was used).
     elephant menu multicaquickadd >/dev/null 2>&1 || true
   elif command -v elephant >/dev/null 2>&1; then
     elephant menu multicaquickadd &
