@@ -37,6 +37,8 @@ ShellRoot {
     property bool statusIsError: true
     property bool busy: false
     property int bootGen: 0
+    // Suppress persist while restoring combos from bootstrap
+    property bool applyingSelection: false
 
     function homeBin(name) {
         const home = Quickshell.env("HOME") || "";
@@ -139,6 +141,8 @@ ShellRoot {
         const agents = root.bootstrap.agents || [];
         const squads = root.bootstrap.squads || [];
 
+        root.applyingSelection = true;
+
         // Reassign via empty first so ComboBox refreshes reliably.
         root.workspaceModel = [];
         root.projectModel = ["No project"];
@@ -155,7 +159,6 @@ ShellRoot {
                 break;
             }
         }
-        workspaceBox.currentIndex = wi;
 
         let pi = 0;
         if (sel.project_id) {
@@ -166,7 +169,6 @@ ShellRoot {
                 }
             }
         }
-        projectBox.currentIndex = pi;
 
         let ci = 0;
         if (sel.created_by_kind === "agent" && sel.created_by_id) {
@@ -184,7 +186,37 @@ ShellRoot {
                 }
             }
         }
-        createdByBox.currentIndex = Math.min(ci, Math.max(0, root.createdByModel.length - 1));
+
+        // Apply indices after models bind (same-frame currentIndex is often dropped).
+        Qt.callLater(() => {
+            workspaceBox.currentIndex = wi;
+            projectBox.currentIndex = pi;
+            createdByBox.currentIndex = Math.min(ci, Math.max(0, root.createdByModel.length - 1));
+            Qt.callLater(() => {
+                root.applyingSelection = false;
+            });
+        });
+    }
+
+    function persistSelection() {
+        if (root.applyingSelection || !root.bootstrap.ok)
+            return;
+        const ws = selectedWorkspaceId();
+        if (!ws)
+            return;
+        const proj = selectedProjectId();
+        const cb = selectedCreatedBy();
+        const bin = root.homeBin("multica-quick-add");
+        let cmd = ["/usr/bin/env", "-u", "BASH_ENV", bin, "--no-notify", "--set-workspace-id", ws, "--set-project-id", proj || ""];
+        if (cb.kind === "squad" && cb.id)
+            cmd = cmd.concat(["--set-squad-id", cb.id]);
+        else if (cb.kind === "agent" && cb.id)
+            cmd = cmd.concat(["--set-agent-id", cb.id]);
+        persistProc.command = cmd;
+        persistProc.running = false;
+        Qt.callLater(() => {
+            persistProc.running = true;
+        });
     }
 
     function submit() {
@@ -205,6 +237,7 @@ ShellRoot {
         }
         busy = true;
         setStatus("Sending…", false);
+        // CLI submit path also writes project/agent into selections.json
         const proj = selectedProjectId();
         const bin = root.homeBin("multica-quick-add");
         let cmd = ["/usr/bin/env", "-u", "BASH_ENV", bin, "--no-notify", "--workspace-id", ws, "--project-id", proj || ""];
@@ -357,6 +390,18 @@ ShellRoot {
             root.busy = false;
             if (code !== 0 && !root.statusText)
                 root.setStatus("Bootstrap failed (is multica logged in?)", true);
+        }
+    }
+
+    Process {
+        id: persistProc
+        running: false
+        command: ["true"]
+        stdout: StdioCollector {
+            waitForEnd: true
+        }
+        stderr: StdioCollector {
+            waitForEnd: true
         }
     }
 
@@ -546,6 +591,7 @@ ShellRoot {
                         enabled: !root.busy && root.workspaceModel.length > 0
                         Layout.preferredWidth: 1
                         Layout.fillWidth: true
+                        onActivated: root.persistSelection()
                     }
 
                     DarkCombo {
@@ -553,6 +599,7 @@ ShellRoot {
                         model: root.projectModel
                         Layout.preferredWidth: 1
                         Layout.fillWidth: true
+                        onActivated: root.persistSelection()
                     }
 
                     DarkCombo {
@@ -561,6 +608,7 @@ ShellRoot {
                         enabled: !root.busy && root.createdByModel.length > 0
                         Layout.preferredWidth: 1.2
                         Layout.fillWidth: true
+                        onActivated: root.persistSelection()
                     }
 
                     Button {

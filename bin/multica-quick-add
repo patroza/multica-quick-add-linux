@@ -216,7 +216,8 @@ if [[ -n "$SET_WORKSPACE_ID" || "$SET_PROJECT" == "1" || -n "$SET_AGENT_ID" || -
     mqa_set_workspace "$SET_WORKSPACE_ID"
   fi
   if [[ "$SET_PROJECT" == "1" ]]; then
-    mqa_set_project "" "$SET_PROJECT_ID"
+    # Prefer explicit --set-workspace-id from the same invocation when present
+    mqa_set_project "${SET_WORKSPACE_ID:-}" "$SET_PROJECT_ID"
   fi
   if [[ -n "$SET_AGENT_ID" ]]; then
     mqa_set_created_by agent "$SET_AGENT_ID" ""

@@ -129,6 +129,7 @@ class MulticaPanel(Adw.Application):
         self._status: Gtk.Label | None = None
         self._send: Gtk.Button | None = None
         self._visible = False
+        self._applying = False
 
     def do_activate(self) -> None:  # noqa: N802
         # Single-instance: re-invoking the hotkey toggles close.
@@ -212,6 +213,7 @@ class MulticaPanel(Adw.Application):
         for dd in (ws, proj, created):
             dd.add_css_class("mqa-dropdown")
             dd.set_hexpand(True)
+            dd.connect("notify::selected", self._on_selection_changed)
             row.append(dd)
 
         send = Gtk.Button(label="Send")
@@ -325,6 +327,7 @@ class MulticaPanel(Adw.Application):
         sel = data.get("selection") or {}
 
         assert self._ws and self._proj and self._created
+        self._applying = True
         self._ws.set_model(Gtk.StringList.new([w.get("name") or w.get("id") for w in workspaces] or ["—"]))
         self._proj.set_model(
             Gtk.StringList.new(["No project"] + [p.get("title") or p.get("id") for p in projects])
@@ -364,6 +367,60 @@ class MulticaPanel(Adw.Application):
         if self._send:
             self._send.set_sensitive(True)
         self._focus_prompt()
+        # Defer so notify::selected from set_selected above is ignored
+        GLib.idle_add(self._end_applying)
+
+    def _end_applying(self) -> bool:
+        self._applying = False
+        return False
+
+    def _on_selection_changed(self, *_args) -> None:
+        if self._applying:
+            return
+        self._persist_selection()
+
+    def _persist_selection(self) -> None:
+        data = self._bootstrap
+        if not data.get("ok") or not self._ws or not self._proj or not self._created:
+            return
+        workspaces = data.get("workspaces") or []
+        projects = data.get("projects") or []
+        agents = data.get("agents") or []
+        squads = data.get("squads") or []
+
+        wi = self._ws.get_selected()
+        if wi < 0 or wi >= len(workspaces):
+            return
+        ws_id = workspaces[wi]["id"]
+        pi = self._proj.get_selected()
+        proj_id = "" if pi <= 0 or pi - 1 >= len(projects) else projects[pi - 1]["id"]
+
+        cmd = [
+            "multica-quick-add",
+            "--no-notify",
+            "--set-workspace-id",
+            ws_id,
+            "--set-project-id",
+            proj_id,
+        ]
+        ci = self._created.get_selected()
+        if 0 <= ci < len(agents):
+            cmd += ["--set-agent-id", agents[ci]["id"]]
+        else:
+            si = ci - len(agents)
+            if 0 <= si < len(squads):
+                cmd += ["--set-squad-id", squads[si]["id"]]
+
+        def work() -> None:
+            try:
+                env = os.environ.copy()
+                env["PATH"] = f"{Path.home() / '.local' / 'bin'}:{env.get('PATH', '')}"
+                env.pop("BASH_ENV", None)
+                subprocess.run(cmd, check=False, capture_output=True, text=True, env=env)
+            except Exception:  # noqa: BLE001
+                pass
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _prompt_text(self) -> str:
         assert self._prompt
