@@ -98,7 +98,8 @@ function GetEntries()
     Value = "workspace",
     Icon = common.icon_workspace(),
     Keywords = { "workspace", "org", ws },
-    Submenu = "multicaworkspace",
+    -- Elephant Lua API requires "SubMenu" (capital M), not "Submenu".
+    SubMenu = "multicaworkspace",
   })
 
   -- 3) Project
@@ -108,7 +109,7 @@ function GetEntries()
     Value = "project",
     Icon = common.icon_project(),
     Keywords = { "project", proj },
-    Submenu = "multicaproject",
+    SubMenu = "multicaproject",
   })
 
   -- 4) Agent / squad
@@ -123,7 +124,7 @@ function GetEntries()
     Value = "createdby",
     Icon = agent_icon,
     Keywords = { "agent", "squad", "assignee", agent },
-    Submenu = "multicacreatedby",
+    SubMenu = "multicacreatedby",
   })
 
   -- 5) Refresh
