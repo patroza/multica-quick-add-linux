@@ -138,42 +138,86 @@ mqa_load_config() {
   return 0
 }
 
-mqa_state_get() {
-  local key="$1"
-  local file="$MQA_STATE_DIR/selections.json"
-  [[ -f "$file" ]] || {
-    printf ''
+# Selections file shape (no dotted keys — those corrupted jq writes under race/old bugs):
+# {
+#   "last_workspace_id": "...",
+#   "workspaces": {
+#     "<ws-id>": {
+#       "project_id": "",
+#       "created_by_kind": "agent",
+#       "created_by_id": "...",
+#       "created_by_name": "..."
+#     }
+#   }
+# }
+
+mqa_state_file() {
+  printf '%s' "$MQA_STATE_DIR/selections.json"
+}
+
+mqa_state_read_object() {
+  local file
+  file="$(mqa_state_file)"
+  mqa_ensure_dirs
+  if [[ -f "$file" ]] && jq -e 'type == "object"' "$file" >/dev/null 2>&1; then
+    cat "$file"
     return 0
-  }
-  jq -r --arg k "$key" '.[$k] // empty' "$file" 2>/dev/null || true
+  fi
+  # Repair corrupt / legacy files
+  printf '{}\n'
+}
+
+mqa_state_write_object() {
+  local json="$1"
+  local file tmp
+  file="$(mqa_state_file)"
+  mqa_ensure_dirs
+  tmp="$(mktemp)"
+  if ! printf '%s\n' "$json" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    rm -f "$tmp"
+    return 1
+  fi
+  printf '%s\n' "$json" | jq '.' >"$tmp"
+  mv "$tmp" "$file"
+}
+
+mqa_state_get() {
+  # Flat legacy keys still supported for reads; prefer nested API helpers below.
+  local key="$1"
+  local obj
+  obj="$(mqa_state_read_object)"
+  jq -r --arg k "$key" '.[$k] // empty' <<<"$obj" 2>/dev/null || true
 }
 
 mqa_state_set() {
   local key="$1"
   local value="$2"
-  local file="$MQA_STATE_DIR/selections.json"
-  mqa_ensure_dirs
-  if [[ ! -f "$file" ]]; then
-    printf '{}\n' >"$file"
-  fi
-  local tmp
-  tmp="$(mktemp)"
-  jq --arg k "$key" --arg v "$value" '.[$k] = $v' "$file" >"$tmp"
-  mv "$tmp" "$file"
+  local obj
+  obj="$(mqa_state_read_object)"
+  obj="$(jq -c --arg k "$key" --arg v "$value" '.[$k] = $v' <<<"$obj")" || obj="{}"
+  mqa_state_write_object "$obj"
 }
 
-mqa_state_set_json() {
-  local key="$1"
-  local json="$2"
-  local file="$MQA_STATE_DIR/selections.json"
-  mqa_ensure_dirs
-  if [[ ! -f "$file" ]]; then
-    printf '{}\n' >"$file"
-  fi
-  local tmp
-  tmp="$(mktemp)"
-  jq --arg k "$key" --argjson v "$json" '.[$k] = $v' "$file" >"$tmp"
-  mv "$tmp" "$file"
+mqa_ws_get() {
+  local workspace_id="$1" field="$2"
+  local obj
+  obj="$(mqa_state_read_object)"
+  jq -r --arg ws "$workspace_id" --arg f "$field" \
+    '.workspaces[$ws][$f] // empty' <<<"$obj" 2>/dev/null || true
+}
+
+mqa_ws_set() {
+  local workspace_id="$1" field="$2" value="$3"
+  local obj
+  obj="$(mqa_state_read_object)"
+  obj="$(
+    jq -c --arg ws "$workspace_id" --arg f "$field" --arg v "$value" '
+      .workspaces = (.workspaces // {})
+      | .workspaces[$ws] = (.workspaces[$ws] // {})
+      | .workspaces[$ws][$f] = $v
+    ' <<<"$obj"
+  )" || return 1
+  mqa_state_write_object "$obj"
 }
 
 mqa_cli_json() {
@@ -465,19 +509,28 @@ mqa_print_selection() {
       workspace_id: "",
       workspace_name: "",
       project_id: "",
-      project_title: "",
+      project_title: "No project",
       created_by_kind: "",
       created_by_id: "",
-      created_by_name: "",
+      created_by_name: "Not set",
       hint: "Pick a workspace first"
     }'
     return 0
   fi
 
-  project_id="$(mqa_normalize_project_id "$(mqa_state_get "last_project_id.$workspace_id")")"
-  kind="$(mqa_state_get "last_created_by_kind.$workspace_id")"
-  cb_id="$(mqa_state_get "last_created_by_id.$workspace_id")"
-  cb_name="$(mqa_state_get "last_created_by_name.$workspace_id")"
+  project_id="$(mqa_normalize_project_id "$(mqa_ws_get "$workspace_id" project_id)")"
+  # migrate legacy dotted keys if present
+  if [[ -z "$project_id" ]]; then
+    project_id="$(mqa_normalize_project_id "$(mqa_state_get "last_project_id.$workspace_id")")"
+  fi
+  kind="$(mqa_ws_get "$workspace_id" created_by_kind)"
+  cb_id="$(mqa_ws_get "$workspace_id" created_by_id)"
+  cb_name="$(mqa_ws_get "$workspace_id" created_by_name)"
+  if [[ -z "$kind" && -z "$cb_id" ]]; then
+    kind="$(mqa_state_get "last_created_by_kind.$workspace_id")"
+    cb_id="$(mqa_state_get "last_created_by_id.$workspace_id")"
+    cb_name="$(mqa_state_get "last_created_by_name.$workspace_id")"
+  fi
 
   catalog="$(mqa_get_catalog "$workspace_id" 0 2>/dev/null || printf '{}')"
   project_title=""
@@ -539,9 +592,9 @@ mqa_print_selection() {
 mqa_set_workspace() {
   local id="${1:?workspace id required}"
   mqa_state_set last_workspace_id "$id"
-  # Refresh catalog once when workspace changes (not on every menu paint).
+  # Ensure workspace bucket exists
+  mqa_ws_set "$id" project_id "$(mqa_ws_get "$id" project_id)"
   mqa_get_catalog "$id" 1 >/dev/null 2>&1 || true
-  touch "$MQA_STATE_DIR/selections.json" 2>/dev/null || true
 }
 
 mqa_set_project() {
@@ -549,8 +602,7 @@ mqa_set_project() {
   workspace_id="$(mqa_resolve_workspace_id "${1:-}")"
   [[ -n "$workspace_id" ]] || mqa_die "No workspace selected"
   project_id="$(mqa_normalize_project_id "${2-}")"
-  mqa_state_set "last_project_id.$workspace_id" "$project_id"
-  touch "$MQA_STATE_DIR/selections.json" 2>/dev/null || true
+  mqa_ws_set "$workspace_id" project_id "$project_id"
 }
 
 mqa_set_created_by() {
@@ -571,20 +623,22 @@ mqa_set_created_by() {
       ' 2>/dev/null || printf '%s' "$id"
     )"
   fi
-  mqa_state_set "last_created_by_kind.$workspace_id" "$kind"
-  mqa_state_set "last_created_by_id.$workspace_id" "$id"
-  mqa_state_set "last_created_by_name.$workspace_id" "$name"
-  touch "$MQA_STATE_DIR/selections.json" 2>/dev/null || true
+  mqa_ws_set "$workspace_id" created_by_kind "$kind"
+  mqa_ws_set "$workspace_id" created_by_id "$id"
+  mqa_ws_set "$workspace_id" created_by_name "$name"
 }
 
 mqa_open_hub() {
   mqa_ensure_walker_service
-  # Do NOT use walker -m (exclusive provider): menus:open / elephant menu
-  # switches to child menus (workspace/project/agent) are ignored while exclusive.
-  # Use a provider *set* so the hub is default but children can still display.
+  # Exclusive -m is OK for initial open; child menus use `elephant menu` which
+  # switches the active provider. Avoid walker -s (exits on some setups).
   if command -v walker >/dev/null 2>&1; then
-    walker -s multica --width 720 --minheight 280 --maxheight 520 \
-      --placeholder "Type an issue…  (ctrl+w workspace · ctrl+p project · ctrl+t agent)" &
+    # close_when_open: toggle if already up, then ensure hub is shown
+    walker -q 2>/dev/null || true
+    walker -m menus:multicaquickadd --width 720 --minheight 280 --maxheight 520 \
+      --placeholder "Multica  ·  pick targets, then Capture" &
+    sleep 0.15
+    elephant menu multicaquickadd >/dev/null 2>&1 || true
   elif command -v elephant >/dev/null 2>&1; then
     elephant menu multicaquickadd &
   else
@@ -593,14 +647,8 @@ mqa_open_hub() {
 }
 
 mqa_reopen_hub() {
-  # Bounce back to hub after a submenu selection (best-effort, single shot).
+  # Return to hub after a submenu pick (do not spawn a second Walker).
   if command -v elephant >/dev/null 2>&1; then
     elephant menu multicaquickadd >/dev/null 2>&1 || true
-    return 0
-  fi
-  if command -v walker >/dev/null 2>&1; then
-    walker --close >/dev/null 2>&1 || true
-    sleep 0.05
-    mqa_open_hub
   fi
 }

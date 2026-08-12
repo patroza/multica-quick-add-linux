@@ -117,5 +117,5 @@ function SelectProject(value, _args, _query)
   if id == "" or id == "nows" or id == "nocat" then
     return
   end
-  common.set_and_return("--set-project-id " .. common.shell_quote(id) .. " --no-notify")
+  common.set_and_return("--set-project-id " .. common.shell_quote(id))
 end

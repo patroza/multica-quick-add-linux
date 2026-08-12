@@ -1,6 +1,6 @@
 -- Multica Quick Add — hub
--- Type an issue in the search box, Enter on ✦ Send to submit.
--- Workspace / Project / Send-to open child menus (via elephant menu protocol).
+-- Capture opens a free-text dmenu (not the search filter).
+-- Workspace / Project / Send-to open child menus via elephant menu protocol.
 
 local home = os.getenv("HOME") or ""
 do
@@ -51,7 +51,6 @@ History = false
 HistoryWhenEmpty = false
 Keywords = { "multica", "quick", "issue", "agent", "mqa" }
 
--- Global menu actions (merged onto every row → Walker keybinds work anytime).
 Actions = {
   open_workspace = "lua:OpenWorkspaceMenu",
   open_project = "lua:OpenProjectMenu",
@@ -59,13 +58,11 @@ Actions = {
 }
 
 local function open_menu(name)
-  -- Prefer elephant's menu protocol (ProviderUpdated → Walker switches provider).
-  -- Avoid walker -m exclusive mode for the hub so children can display.
   os.execute("elephant menu " .. tostring(name) .. " >/dev/null 2>&1")
 end
 
-function GetEntries(query)
-  local q = common.trim(query or "")
+function GetEntries(_query)
+  -- Intentionally ignore query for filtering targets: Capture is free-text dmenu.
   local entries = {}
   local sel = common.selection() or {}
   local ready = sel.ready == true or sel.ready == "true"
@@ -75,80 +72,53 @@ function GetEntries(query)
   local hint = sel.hint or ""
   local err = sel.error
 
-  -- 1) Primary: type issue text in the search box, Enter on this row to send.
-  -- Include the query in Text so fuzzy match keeps this row selected while typing.
   if ready then
-    local text
-    local sub
-    if q == "" then
-      text = "✦  Type an issue…"
-      sub = (hint ~= "" and hint or (agent .. " · " .. proj)) .. "  ·  Enter to send"
-    else
-      text = "✦  Send  ·  " .. q
-      sub = hint ~= "" and hint or (agent .. " · " .. proj)
-    end
-    -- Action name "send" (not "open") so Walker can Close after submit,
-    -- while picker rows use "open" with after=Nothing.
     table.insert(entries, {
-      Text = text,
-      Subtext = sub,
-      Value = q,
+      Text = "✦  Capture",
+      Subtext = (hint ~= "" and hint or (agent .. " · " .. proj)) .. "  ·  free-text prompt",
+      Value = "capture",
       Icon = common.icon_capture(),
-      Keywords = { "capture", "send", "issue", q, agent, proj },
-      Actions = {
-        send = "lua:Capture",
-      },
+      Keywords = { "capture", "send", "issue", "new", agent, proj },
+      Actions = { open = "lua:Capture" },
     })
   else
     table.insert(entries, {
-      Text = "✦  Type an issue…",
-      Subtext = err or "Choose an agent first (Send to)",
-      Value = "",
+      Text = "✦  Capture",
+      Subtext = err or "Set Send to (agent) first",
+      Value = "capture-disabled",
       Icon = common.icon_capture(),
-      Keywords = { "capture", q },
-      Actions = {
-        send = "lua:NeedAgent",
-      },
+      Keywords = { "capture" },
+      Actions = { open = "lua:NeedAgent" },
     })
   end
 
-  -- 2–4) Target pickers — elephant menu protocol (not SubMenu / not walker -m).
   table.insert(entries, {
     Text = "🏢  Workspace",
-    Subtext = ws .. "  ·  ctrl+w",
+    Subtext = ws,
     Value = "workspace",
     Icon = common.icon_workspace(),
-    Keywords = { "workspace", "org", "ctrl+w", ws },
-    Actions = {
-      open = "lua:OpenWorkspaceMenu",
-    },
+    Keywords = { "workspace", ws },
+    Actions = { open = "lua:OpenWorkspaceMenu" },
   })
 
   table.insert(entries, {
     Text = "📁  Project",
-    Subtext = proj .. "  ·  ctrl+p",
+    Subtext = proj,
     Value = "project",
     Icon = common.icon_project(),
-    Keywords = { "project", "ctrl+p", proj },
-    Actions = {
-      open = "lua:OpenProjectMenu",
-    },
+    Keywords = { "project", proj },
+    Actions = { open = "lua:OpenProjectMenu" },
   })
 
   local agent_icon = (sel.created_by_kind == "squad") and common.icon_squad() or common.icon_agent()
-  local agent_label = "🤖  Send to"
-  if sel.created_by_kind == "squad" then
-    agent_label = "👥  Send to"
-  end
+  local agent_label = (sel.created_by_kind == "squad") and "👥  Send to" or "🤖  Send to"
   table.insert(entries, {
     Text = agent_label,
-    Subtext = agent .. "  ·  ctrl+t",
+    Subtext = agent,
     Value = "createdby",
     Icon = agent_icon,
-    Keywords = { "agent", "squad", "team", "ctrl+t", agent },
-    Actions = {
-      open = "lua:OpenCreatedByMenu",
-    },
+    Keywords = { "agent", "squad", "team", agent },
+    Actions = { open = "lua:OpenCreatedByMenu" },
   })
 
   table.insert(entries, {
@@ -156,46 +126,23 @@ function GetEntries(query)
     Subtext = "Reload projects, agents, and squads",
     Value = "refresh",
     Icon = "view-refresh",
-    Keywords = { "refresh", "reload", "sync" },
-    Actions = {
-      open = "lua:Refresh",
-    },
+    Keywords = { "refresh", "reload" },
+    Actions = { open = "lua:Refresh" },
   })
-
-  if not sel.workspace_id or sel.workspace_id == "" then
-    table.insert(entries, {
-      Text = "⚠  Not configured",
-      Subtext = "Run multica login, then pick a workspace",
-      Value = "login",
-      Icon = "dialog-warning",
-      Actions = {
-        open = "notify-send 'Multica Quick Add' 'Run: multica setup   then open this hub again'",
-      },
-    })
-  end
 
   return entries
 end
 
-function Capture(value, _args, query)
-  -- Prefer explicit value (row Value = typed query); fall back to live query.
-  local prompt = common.trim(value or "")
-  if prompt == "" then
-    prompt = common.trim(query or "")
-  end
-  if prompt == "" then
-    -- Fall back to free-text dmenu if opened with empty query.
-    common.capture()
-    return
-  end
-  common.run_bg(common.shell_quote(common.script()) .. " " .. common.shell_quote(prompt))
+function Capture(_value, _args, _query)
+  -- Always free-text dmenu — never use Walker search as the issue body.
+  common.capture()
 end
 
 function NeedAgent(_value, _args, _query)
   os.execute(
-    "notify-send 'Multica Quick Add' 'Pick an agent or squad under Send to, then try again'"
+    "notify-send 'Multica Quick Add' 'Pick Send to (agent/squad) first'"
   )
-  open_menu("multicacreatedby")
+  -- Do not auto-open Send to (that felt like getting stuck in a submenu).
 end
 
 function OpenWorkspaceMenu(_value, _args, _query)

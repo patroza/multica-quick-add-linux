@@ -107,5 +107,5 @@ function SelectWorkspace(value, _args, _query)
   if id == "" or id == "err" or id == "empty" then
     return
   end
-  common.set_and_return("--set-workspace-id " .. common.shell_quote(id) .. " --no-notify")
+  common.set_and_return("--set-workspace-id " .. common.shell_quote(id))
 end

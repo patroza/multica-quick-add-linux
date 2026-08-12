@@ -135,9 +135,10 @@ function SelectCreatedBy(value, _args, _query)
   if not kind or not id then
     return
   end
+  -- Persist selection then return to hub (notify so user sees confirmation).
   if kind == "agent" then
-    common.set_and_return("--set-agent-id " .. common.shell_quote(id) .. " --no-notify")
+    common.set_and_return("--set-agent-id " .. common.shell_quote(id))
   elseif kind == "squad" then
-    common.set_and_return("--set-squad-id " .. common.shell_quote(id) .. " --no-notify")
+    common.set_and_return("--set-squad-id " .. common.shell_quote(id))
   end
 end

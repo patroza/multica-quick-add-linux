@@ -294,7 +294,8 @@ fi
 
 # --- project ---
 if [[ "$PROJECT_ID_SET" != "1" ]]; then
-  PROJECT_ID="$(mqa_state_get "last_project_id.$WORKSPACE_ID")"
+  PROJECT_ID="$(mqa_ws_get "$WORKSPACE_ID" project_id)"
+  [[ -n "$PROJECT_ID" ]] || PROJECT_ID="$(mqa_state_get "last_project_id.$WORKSPACE_ID")"
 fi
 if [[ "$PICK" == "1" ]]; then
   mapfile -t project_lines < <(printf '%s' "$catalog" | mqa_project_lines)
@@ -304,7 +305,7 @@ if [[ "$PICK" == "1" ]]; then
 else
   PROJECT_ID="$(mqa_normalize_project_id "${PROJECT_ID:-}")"
 fi
-mqa_state_set "last_project_id.$WORKSPACE_ID" "${PROJECT_ID:-}"
+mqa_ws_set "$WORKSPACE_ID" project_id "${PROJECT_ID:-}"
 
 # --- created-by (agent | squad) ---
 CREATED_BY_KIND=""
@@ -329,8 +330,12 @@ elif [[ -n "$CREATED_BY_NAME" ]]; then
   [[ -n "$match" ]] || mqa_die "No agent/squad matching \"$CREATED_BY_NAME\""
   IFS=$'\t' read -r CREATED_BY_KIND CREATED_BY_ID CREATED_BY_NAME_RESOLVED <<<"$match"
 else
-  last_kind="$(mqa_state_get "last_created_by_kind.$WORKSPACE_ID")"
-  last_id="$(mqa_state_get "last_created_by_id.$WORKSPACE_ID")"
+  last_kind="$(mqa_ws_get "$WORKSPACE_ID" created_by_kind)"
+  last_id="$(mqa_ws_get "$WORKSPACE_ID" created_by_id)"
+  if [[ -z "$last_kind" || -z "$last_id" ]]; then
+    last_kind="$(mqa_state_get "last_created_by_kind.$WORKSPACE_ID")"
+    last_id="$(mqa_state_get "last_created_by_id.$WORKSPACE_ID")"
+  fi
   if [[ "$PICK" == "1" || -z "$last_kind" || -z "$last_id" ]]; then
     mapfile -t cb_lines < <(printf '%s' "$catalog" | mqa_created_by_lines)
     [[ ${#cb_lines[@]} -gt 0 ]] || mqa_die "No agents or squads in this workspace."
@@ -341,7 +346,8 @@ else
   else
     CREATED_BY_KIND="$last_kind"
     CREATED_BY_ID="$last_id"
-    CREATED_BY_NAME_RESOLVED="$(mqa_state_get "last_created_by_name.$WORKSPACE_ID")"
+    CREATED_BY_NAME_RESOLVED="$(mqa_ws_get "$WORKSPACE_ID" created_by_name)"
+    [[ -n "$CREATED_BY_NAME_RESOLVED" ]] || CREATED_BY_NAME_RESOLVED="$(mqa_state_get "last_created_by_name.$WORKSPACE_ID")"
   fi
 fi
 
@@ -357,9 +363,9 @@ if [[ -z "$CREATED_BY_NAME_RESOLVED" ]]; then
   )"
 fi
 
-mqa_state_set "last_created_by_kind.$WORKSPACE_ID" "$CREATED_BY_KIND"
-mqa_state_set "last_created_by_id.$WORKSPACE_ID" "$CREATED_BY_ID"
-mqa_state_set "last_created_by_name.$WORKSPACE_ID" "$CREATED_BY_NAME_RESOLVED"
+mqa_ws_set "$WORKSPACE_ID" created_by_kind "$CREATED_BY_KIND"
+mqa_ws_set "$WORKSPACE_ID" created_by_id "$CREATED_BY_ID"
+mqa_ws_set "$WORKSPACE_ID" created_by_name "$CREATED_BY_NAME_RESOLVED"
 
 if [[ "$CONFIGURE" == "1" ]]; then
   msg="workspace=$WORKSPACE_ID project=${PROJECT_ID:-none} → $CREATED_BY_NAME_RESOLVED"

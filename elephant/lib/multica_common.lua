@@ -129,7 +129,7 @@ function M.ensure_catalog(workspace_id)
 end
 
 function M.set_and_return(args)
-  -- args: full flag string after script, e.g. "--set-project-id '…' --reopen-hub"
+  -- Persist, notify, then bounce Walker back to the hub via elephant menu.
   M.run_bg(M.shell_quote(M.script()) .. " " .. args .. " --reopen-hub")
 end
 
