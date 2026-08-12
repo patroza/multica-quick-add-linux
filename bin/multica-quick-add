@@ -20,44 +20,37 @@ source "$MQA_ROOT/lib/multica-quick-add.sh"
 
 usage() {
   cat <<'EOF'
-Multica Quick Add (Walker / Elephant)
+Multica Quick Add
 
 USAGE
+  multica-quick-add --panel          # Quickshell floating panel (recommended)
+  multica-quick-add --panel-gtk      # GTK4 comparison panel
+  multica-quick-add --hub            # Walker/Elephant hub (legacy)
   multica-quick-add [flags] [prompt...]
-  multica-quick-add --hub
-  multica-quick-add --pick
-  multica-quick-add --print-selection
-  multica-quick-add --set-workspace-id ID
-  multica-quick-add --set-project-id ID   # empty / __none__ clears
-  multica-quick-add --set-agent-id ID
-  multica-quick-add --set-squad-id ID
 
 FLAGS
-  --hub                  Open the Elephant/Walker Multica hub
-  --pick                 Force workspace / project / agent pickers (CLI wizard)
-  --configure            Interactive pickers; save only (no submit)
-  --refresh              Refresh Multica catalog cache for current workspace
-  --print-selection      JSON of current workspace/project/created-by
-  --set-workspace-id ID  Save workspace selection (no submit)
-  --set-project-id ID    Save project (empty or __none__ = no project)
+  --panel                Open Quickshell panel (toggle if daemon running)
+  --panel-gtk            Open GTK4/Adwaita panel
+  --hub                  Open Walker/Elephant Multica hub
+  --pick                 Force CLI pickers then prompt
+  --configure            Interactive pickers; save only
+  --refresh              Refresh Multica catalog cache
+  --print-selection      JSON of current selection
+  --set-workspace-id ID  Save workspace
+  --set-project-id ID    Save project (empty / __none__ clears)
   --set-agent-id ID      Save created-by agent
   --set-squad-id ID      Save created-by squad
-  --reopen-hub           After --set-*, reopen the Multica hub
+  --reopen-hub           After --set-*, reopen Walker hub
   --workspace-id ID      Override workspace for this run
   --project-id ID        Override project for this run
   --agent-id ID          Submit as this agent
   --squad-id ID          Submit as this squad
-  --created-by NAME      Fuzzy name match against agents then squads
+  --created-by NAME      Fuzzy agent/squad name
   --attachment PATH      Attach a file (repeatable)
   --no-notify            Print result to stdout instead of notify-send
   -h, --help             Show this help
 
-HUB
-  Open with:  multica-quick-add --hub
-              walker -m menus:multicaquickadd
-              type prefix mqa in Walker
-
-Requires: multica CLI logged in, walker, jq, curl, notify-send.
+Requires: multica CLI logged in, jq, curl. Panels need Quickshell or GTK4.
 EOF
 }
 
@@ -66,6 +59,8 @@ CONFIGURE=0
 REFRESH=0
 NO_NOTIFY=0
 HUB=0
+PANEL=0
+PANEL_GTK=0
 PRINT_SELECTION=0
 REOPEN_HUB=0
 SET_WORKSPACE_ID=""
@@ -87,6 +82,14 @@ while [[ $# -gt 0 ]]; do
     -h | --help)
       usage
       exit 0
+      ;;
+    --panel)
+      PANEL=1
+      shift
+      ;;
+    --panel-gtk)
+      PANEL_GTK=1
+      shift
       ;;
     --hub)
       HUB=1
@@ -177,7 +180,14 @@ done
 mqa_require_cmd jq
 mqa_ensure_dirs
 
-# Hub does not need Multica auth just to open the UI.
+if [[ "$PANEL" == "1" ]]; then
+  mqa_open_panel
+  exit 0
+fi
+if [[ "$PANEL_GTK" == "1" ]]; then
+  mqa_open_panel_gtk
+  exit 0
+fi
 if [[ "$HUB" == "1" ]]; then
   mqa_open_hub
   exit 0

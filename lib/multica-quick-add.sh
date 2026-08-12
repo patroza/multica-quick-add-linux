@@ -662,6 +662,59 @@ mqa_set_created_by() {
   mqa_ws_set "$workspace_id" created_by_name "$name"
 }
 
+mqa_qs_config_dir() {
+  printf '%s' "${XDG_CONFIG_HOME:-$HOME/.config}/quickshell/multica-quick-add"
+}
+
+mqa_ensure_qs_daemon() {
+  command -v qs >/dev/null 2>&1 || mqa_die "quickshell (qs) is not installed"
+  # Already running for this config?
+  if qs list --all 2>/dev/null | grep -qi 'multica-quick-add'; then
+    return 0
+  fi
+  local cfg
+  cfg="$(mqa_qs_config_dir)"
+  [[ -f "$cfg/shell.qml" ]] || mqa_die "Quickshell config missing at $cfg (run install.sh)"
+  # Detached daemon, one instance
+  qs -c multica-quick-add -n -d >/dev/null 2>&1 || qs -p "$cfg" -n -d >/dev/null 2>&1 || true
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    if qs list --all 2>/dev/null | grep -qi 'multica-quick-add'; then
+      return 0
+    fi
+    sleep 0.15
+  done
+  return 0
+}
+
+mqa_open_panel() {
+  # Quickshell Tim-style floating panel
+  mqa_ensure_qs_daemon
+  if qs -c multica-quick-add ipc call panel toggle >/dev/null 2>&1; then
+    return 0
+  fi
+  # Fallback: path-based instance
+  local cfg
+  cfg="$(mqa_qs_config_dir)"
+  if qs -p "$cfg" ipc call panel toggle >/dev/null 2>&1; then
+    return 0
+  fi
+  # Last resort: launch visible once (non-daemon)
+  qs -c multica-quick-add -n >/dev/null 2>&1 &
+  sleep 0.4
+  qs -c multica-quick-add ipc call panel open >/dev/null 2>&1 || true
+}
+
+mqa_open_panel_gtk() {
+  local panel
+  panel="${MQA_ROOT}/panel/gtk/multica_quick_add_panel.py"
+  if [[ ! -f "$panel" ]]; then
+    panel="$HOME/pj/macs/multica-quick-add-walker/panel/gtk/multica_quick_add_panel.py"
+  fi
+  [[ -f "$panel" ]] || mqa_die "GTK panel not found"
+  exec python3 "$panel"
+}
+
 mqa_open_hub() {
   mqa_ensure_walker_service
   # Exclusive -m is OK for initial open; child menus use `elephant menu` which

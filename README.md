@@ -1,29 +1,21 @@
-# Multica Quick Add — Walker / Elephant
+# Multica Quick Add (Linux)
 
-Linux port of [tim-smart/multica-quick-add](https://github.com/tim-smart/multica-quick-add): capture free-text prompts and submit them to Multica’s **quick-create** API so an agent or squad turns them into well-formed issues.
+Linux port of [tim-smart/multica-quick-add](https://github.com/tim-smart/multica-quick-add): a Spotlight-style capture bar that sends free-text prompts to Multica’s **quick-create** API.
 
-Upstream is a native macOS menu-bar panel. This fork uses [Walker](https://github.com/abenz1267/walker) + [Elephant](https://github.com/abenz1267/elephant) with a **hub menu** that remembers workspace, project, and agent/squad.
+## UIs (pick one)
 
-## Multica hub
-
-Open the hub (`multica-quick-add --hub` or Walker prefix `mqa`):
-
-| Row | Action |
-| --- | --- |
-| **✦ Capture** | Type a prompt and send with the current selection |
-| **🏢 Workspace** | Submenu — pick workspace (● marks current) |
-| **📁 Project** | Submenu — pick project or “No project” |
-| **🤖 / 👥 Send to** | Submenu — pick agent or squad |
-| **↻ Refresh catalog** | Reload projects/agents/squads from Multica |
-
-Selections persist under `~/.local/state/multica-quick-add/`. Changing a target reopens the hub with the new values visible.
+| UI | Command | Notes |
+| --- | --- | --- |
+| **Quickshell panel** (recommended) | `multica-quick-add --panel` | Real floating window: live typing + dropdowns (Tim-like) |
+| **GTK4 panel** | `multica-quick-add --panel-gtk` | Same idea in GTK/Adwaita for comparison |
+| **Walker hub** (legacy) | `multica-quick-add --hub` | List/submenu experiment; not great for free-text |
 
 ## Requirements
 
-- Walker and Elephant
-- Multica CLI configured and logged in (`multica setup` / `multica login`)
+- Multica CLI logged in (`multica setup` / `multica login`)
 - `jq`, `curl`, `notify-send`
-- Optional: `fzf` (CLI wizard fallback when Walker is unavailable)
+- **Quickshell panel:** [quickshell](https://quickshell.org/) (`qs`)
+- **GTK panel:** Python 3 + `python-gobject`, GTK4, libadwaita (optional `gtk4-layer-shell`)
 
 ## Install
 
@@ -33,63 +25,60 @@ cd multica-quick-add-walker
 ./install.sh
 ```
 
-Installs:
+This links CLI tools into `~/.local/bin`, installs the Quickshell config at  
+`~/.config/quickshell/multica-quick-add/`, and tries to enable a user systemd unit for the panel daemon.
 
-- `~/.local/bin/multica-quick-add`
-- Elephant menus: hub + workspace / project / created-by submenus
-- Walker provider `menus:multicaquickadd` and prefix `mqa` (when config exists)
+### Hotkey (niri)
 
-Credentials stay in local `~/.multica/config.json` only.
+```kdl
+Super+Shift+Space hotkey-overlay-title="Multica Quick Add" {
+  spawn-sh "multica-quick-add --panel";
+}
+```
 
 ## Usage
 
 ```sh
-# Open hub (recommended)
-multica-quick-add --hub
-walker -m menus:multicaquickadd
-# or type prefix: mqa
+# Toggle Quickshell panel (starts daemon if needed)
+multica-quick-add --panel
 
-# Capture immediately with last selection
-multica-quick-add
-multica-quick-add "Investigate flaky checkout"
+# GTK comparison panel
+multica-quick-add --panel-gtk
 
-# CLI wizard (pickers then prompt)
-multica-quick-add --pick
+# Non-interactive send (uses saved / flag selection)
+multica-quick-add --agent-id <uuid> "Investigate flaky checkout"
 
-# Inspect / mutate selection (used by the hub)
+# Selection helpers
 multica-quick-add --print-selection
-multica-quick-add --set-workspace-id <uuid>
-multica-quick-add --set-project-id ''          # clear project
-multica-quick-add --set-agent-id <uuid>
-multica-quick-add --set-squad-id <uuid>
+mqa-bootstrap   # full JSON for panel UIs
 ```
 
-Successful submit shows **Sent to \<agent\>**. Multica enqueues the task; the agent creates the issue asynchronously.
+### Quickshell panel UX
 
-### Example compositor bind (niri)
+- Type in the text field (characters echo live)
+- Choose workspace / project / agent-or-squad
+- **Enter** or **Send** submits; **Esc** dismisses
+- Remembers last selection under `~/.local/state/multica-quick-add/`
 
-```kdl
-// ~/.config/niri/bindings.kdl
-Super+Shift+Space hotkey-overlay-title="Multica Quick Add" {
-  spawn-sh "multica-quick-add --hub";
-}
-```
-
-## Comparison with upstream
-
-| Upstream (macOS) | This fork |
-| --- | --- |
-| Floating panel with pickers | Elephant hub + submenus + prompt dmenu |
-| Remember last workspace/project/agent | Same (per-workspace project & created-by) |
-| Multica CLI lists + quick-create API | Same |
-| Image paste/drop | `--attachment PATH` |
-
-## Development
+IPC (daemon must be running):
 
 ```sh
-./tests/test-payload.sh
+qs -c multica-quick-add ipc call panel toggle
+qs -c multica-quick-add ipc call panel open
+qs -c multica-quick-add ipc call panel close
+```
+
+## Layout
+
+```
+bin/multica-quick-add      # CLI + launchers
+bin/mqa-bootstrap          # JSON bootstrap for panels
+lib/multica-quick-add.sh   # shared Multica API / state
+panel/quickshell/shell.qml # Quickshell UI
+panel/gtk/...panel.py      # GTK UI
+elephant/menus/            # legacy Walker hub
 ```
 
 ## License
 
-Small utility; no warranty. Multica and Multica CLI remain under their own licenses.
+Small utility; no warranty. Multica remains under its own licenses.

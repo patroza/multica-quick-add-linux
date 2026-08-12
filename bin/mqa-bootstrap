@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Emit a single JSON document for Multica panel UIs (Quickshell / GTK).
+set -euo pipefail
+unset BASH_ENV || true
+
+_mqa_src="${BASH_SOURCE[0]}"
+while [[ -L "$_mqa_src" ]]; do
+  _mqa_dir="$(cd -P "$(dirname "$_mqa_src")" && pwd)"
+  _mqa_src="$(readlink "$_mqa_src")"
+  [[ "$_mqa_src" != /* ]] && _mqa_src="$_mqa_dir/$_mqa_src"
+done
+MQA_ROOT="$(cd -P "$(dirname "$_mqa_src")/.." && pwd)"
+# shellcheck source=../lib/multica-quick-add.sh
+source "$MQA_ROOT/lib/multica-quick-add.sh"
+
+mqa_ensure_dirs
+if ! mqa_load_config 2>/dev/null; then
+  jq -n '{
+    ok: false,
+    error: "not_logged_in",
+    message: "Run multica login / multica setup first",
+    selection: null,
+    workspaces: [],
+    projects: [],
+    agents: [],
+    squads: []
+  }'
+  exit 0
+fi
+
+mqa_require_cmd multica jq
+
+workspaces="$(mqa_list_workspaces 2>/dev/null || printf '[]')"
+ws_id="$(mqa_resolve_workspace_id "")"
+if [[ -z "$ws_id" ]]; then
+  ws_id="$(jq -r '.[0].id // empty' <<<"$workspaces")"
+  [[ -n "$ws_id" ]] && mqa_state_set last_workspace_id "$ws_id"
+fi
+
+catalog="{}"
+if [[ -n "$ws_id" ]]; then
+  catalog="$(mqa_get_catalog "$ws_id" 0 2>/dev/null || printf '{}')"
+  # Soft background refresh for next open
+  (mqa_get_catalog "$ws_id" 1 >/dev/null 2>&1 || true) &
+fi
+
+selection="$(mqa_print_selection)"
+
+jq -n \
+  --argjson workspaces "$workspaces" \
+  --argjson catalog "$catalog" \
+  --argjson selection "$selection" \
+  '{
+    ok: true,
+    error: null,
+    message: "",
+    selection: $selection,
+    workspaces: ($workspaces | map({id, name: (.name // .id)})),
+    projects: (($catalog.projects // []) | map({id, title: (.title // .name // .id)})),
+    agents: (($catalog.agents // []) | map({id, name: (.name // .id)})),
+    squads: (($catalog.squads // []) | map({id, name: (.name // .id)}))
+  }'
