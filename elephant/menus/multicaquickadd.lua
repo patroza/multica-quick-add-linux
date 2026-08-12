@@ -44,7 +44,9 @@ NamePretty = "Multica"
 Icon = "mail-message-new"
 Description = "Quick-create issues for Multica agents"
 Cache = false
-RefreshOnChange = { common.state_dir }
+-- Only watch selections.json — NOT the whole state dir. Watching cache/ made
+-- --refresh rewrite catalog → RefreshOnChange → GetEntries → --refresh forever.
+RefreshOnChange = { common.state_dir .. "/selections.json" }
 SearchName = true
 FixedOrder = true
 HideFromProviderlist = false
@@ -62,10 +64,7 @@ function GetEntries()
   local hint = sel.hint or ""
   local err = sel.error
 
-  -- Warm catalog in background when we have a workspace
-  if sel.workspace_id and sel.workspace_id ~= "" then
-    common.run_bg(common.shell_quote(common.script()) .. " --refresh --no-notify")
-  end
+  -- Do not auto --refresh here (that + RefreshOnChange on cache = fork bomb).
 
   -- 1) Capture (primary)
   if ready then
@@ -165,7 +164,10 @@ function NeedAgent(_value, _args, _query)
 end
 
 function Refresh(_value, _args, _query)
-  common.run_bg(common.shell_quote(common.script()) .. " --refresh")
-  os.execute("notify-send 'Multica Quick Add' 'Refreshing catalog…'")
-  common.run_bg(common.shell_quote(common.script()) .. " --hub")
+  -- Sync refresh only (user-initiated). Do not chain --hub here; Walker is
+  -- already open on this menu and RefreshOnChange will reload labels.
+  os.execute(common.shell_quote(common.script()) .. " --refresh --no-notify >/dev/null 2>&1")
+  -- Touch selections so hub text reloads without opening a second Walker.
+  os.execute("touch " .. common.shell_quote(common.state_dir .. "/selections.json") .. " 2>/dev/null")
+  os.execute("notify-send 'Multica Quick Add' 'Catalog refreshed'")
 end

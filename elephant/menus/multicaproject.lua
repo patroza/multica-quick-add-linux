@@ -36,7 +36,7 @@ Icon = "folder"
 Description = "Choose Multica project (optional)"
 Parent = "multicaquickadd"
 Cache = false
-RefreshOnChange = { common.state_dir }
+RefreshOnChange = { common.state_dir .. "/selections.json" }
 FixedOrder = true
 HideFromProviderlist = true
 SearchName = false
@@ -57,7 +57,8 @@ function GetEntries()
     return entries
   end
 
-  local path = common.ensure_catalog(ws) or common.catalog_path(ws)
+  -- Use cache only; never force-refresh inside GetEntries (loop risk).
+  local path = common.catalog_path(ws)
   if not path then
     table.insert(entries, {
       Text = "Catalog unavailable",

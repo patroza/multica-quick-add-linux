@@ -539,8 +539,8 @@ mqa_print_selection() {
 mqa_set_workspace() {
   local id="${1:?workspace id required}"
   mqa_state_set last_workspace_id "$id"
+  # Refresh catalog once when workspace changes (not on every menu paint).
   mqa_get_catalog "$id" 1 >/dev/null 2>&1 || true
-  # Touch selections so Elephant RefreshOnChange fires even if catalog unchanged
   touch "$MQA_STATE_DIR/selections.json" 2>/dev/null || true
 }
 
@@ -591,12 +591,13 @@ mqa_open_hub() {
 }
 
 mqa_reopen_hub() {
-  # Bounce back to hub after a submenu selection (best-effort).
+  # Bounce back to hub after a submenu selection (best-effort, single shot).
+  # Prefer Elephant's menu protocol so we don't spawn stacked Walker clients.
   if command -v elephant >/dev/null 2>&1; then
     elephant menu multicaquickadd >/dev/null 2>&1 || true
+    return 0
   fi
   if command -v walker >/dev/null 2>&1; then
-    # Close any transient dmenu, then show hub
     walker --close >/dev/null 2>&1 || true
     sleep 0.05
     walker -m menus:multicaquickadd --width 720 --minheight 280 --maxheight 480 >/dev/null 2>&1 &
