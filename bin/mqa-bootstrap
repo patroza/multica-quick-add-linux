@@ -14,12 +14,22 @@ MQA_ROOT="$(cd -P "$(dirname "$_mqa_src")/.." && pwd)"
 source "$MQA_ROOT/lib/multica-quick-add.sh"
 
 mqa_ensure_dirs
+
+draft_file="$(mqa_draft_path)"
+draft_args=()
+if [[ -f "$draft_file" ]]; then
+  draft_args=(--rawfile draft "$draft_file")
+else
+  draft_args=(--arg draft "")
+fi
+
 if ! mqa_load_config 2>/dev/null; then
-  jq -n '{
+  jq -n "${draft_args[@]}" '{
     ok: false,
     error: "not_logged_in",
     message: "Run multica login / multica setup first",
     selection: null,
+    draft: $draft,
     workspaces: [],
     projects: [],
     agents: [],
@@ -40,13 +50,15 @@ fi
 catalog="{}"
 if [[ -n "$ws_id" ]]; then
   catalog="$(mqa_get_catalog "$ws_id" 0 2>/dev/null || printf '{}')"
-  # Soft background refresh for next open
+  # Soft background refresh for next open — disown so parent exit is instant
   (mqa_get_catalog "$ws_id" 1 >/dev/null 2>&1 || true) &
+  disown 2>/dev/null || true
 fi
 
 selection="$(mqa_print_selection)"
 
 jq -n \
+  "${draft_args[@]}" \
   --argjson workspaces "$workspaces" \
   --argjson catalog "$catalog" \
   --argjson selection "$selection" \
@@ -55,6 +67,7 @@ jq -n \
     error: null,
     message: "",
     selection: $selection,
+    draft: $draft,
     workspaces: ($workspaces | map({id, name: (.name // .id)})),
     projects: (($catalog.projects // []) | map({id, title: (.title // .name // .id)})),
     agents: (($catalog.agents // []) | map({id, name: (.name // .id)})),

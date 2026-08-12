@@ -45,22 +45,51 @@ ShellRoot {
         return home + "/.local/bin/" + name;
     }
 
-    function showPanel() {
-        // Order matters: never throw before reloadBootstrap.
-        panel.visible = true;
-        reloadBootstrap();
+    function draftPath() {
+        const home = Quickshell.env("HOME") || "";
+        const state = Quickshell.env("XDG_STATE_HOME") || (home + "/.local/state");
+        return state + "/multica-quick-add/draft.txt";
+    }
+
+    function focusPrompt() {
         Qt.callLater(() => {
             if (promptField)
                 promptField.forceActiveFocus();
         });
     }
 
+    function showPanel() {
+        // Order matters: never throw before reloadBootstrap.
+        panel.visible = true;
+        reloadBootstrap();
+        focusPrompt();
+    }
+
     function hidePanel() {
+        // Keep unsaved prompt as draft (cleared only on successful send)
+        saveDraft(promptField ? promptField.text : "");
         panel.visible = false;
-        promptField.text = "";
+        if (promptField)
+            promptField.text = "";
         statusText = "";
         statusIsError = true;
         busy = false;
+    }
+
+    function saveDraft(text) {
+        draftSaveProc.pendingText = text || "";
+        draftSaveProc.running = false;
+        Qt.callLater(() => {
+            draftSaveProc.stdinEnabled = true;
+            draftSaveProc.running = true;
+        });
+    }
+
+    function clearDraft() {
+        draftClearProc.running = false;
+        Qt.callLater(() => {
+            draftClearProc.running = true;
+        });
     }
 
     function togglePanel() {
@@ -260,6 +289,20 @@ ShellRoot {
         enabled: !root.busy
         font.pixelSize: 13
         font.family: "Inter, system-ui, sans-serif"
+        // After picking, return focus to the prompt so Esc dismisses the panel
+        // instead of being eaten by the combo.
+        onActivated: root.focusPrompt()
+        Keys.onPressed: event => {
+            if (event.key === Qt.Key_Escape) {
+                if (combo.popup.visible) {
+                    combo.popup.close();
+                    root.focusPrompt();
+                } else {
+                    root.hidePanel();
+                }
+                event.accepted = true;
+            }
+        }
 
         background: Rectangle {
             implicitHeight: 36
@@ -373,11 +416,17 @@ ShellRoot {
                     } else {
                         root.setStatus("", false);
                         root.applySelectionToCombos();
+                        // Restore unsaved draft (do not clobber if user already typed)
+                        if (typeof data.draft === "string" && data.draft.length > 0) {
+                            if (!promptField.text || promptField.text.length === 0)
+                                promptField.text = data.draft;
+                        }
                         if (!(data.workspaces || []).length)
                             root.setStatus("No workspaces — check multica auth", true);
                         else if (!(data.agents || []).length && !(data.squads || []).length)
                             root.setStatus("No agents/squads in workspace", true);
                     }
+                    root.focusPrompt();
                 } catch (e) {
                     root.setStatus("Failed to parse Multica data", true);
                 }
@@ -430,7 +479,12 @@ ShellRoot {
                 });
                 promptField.text = "";
                 root.setStatus("", false);
-                root.hidePanel();
+                root.clearDraft();
+                // Skip draft save on successful send
+                panel.visible = false;
+                statusText = "";
+                statusIsError = true;
+                busy = false;
             } else if (!root.statusText) {
                 root.setStatus("Send failed", true);
             }
@@ -443,6 +497,25 @@ ShellRoot {
         command: ["true"]
     }
 
+    Process {
+        id: draftSaveProc
+        property string pendingText: ""
+        running: false
+        // Empty draft removes the file so the next open starts blank.
+        command: ["bash", "-c", "mkdir -p \"$(dirname \"$1\")\" && cat > \"$1.tmp\" && if [ ! -s \"$1.tmp\" ]; then rm -f \"$1.tmp\" \"$1\"; else mv \"$1.tmp\" \"$1\"; fi", "bash", root.draftPath()]
+        stdinEnabled: true
+        onStarted: {
+            draftSaveProc.write(draftSaveProc.pendingText);
+            draftSaveProc.stdinEnabled = false;
+        }
+    }
+
+    Process {
+        id: draftClearProc
+        running: false
+        command: ["rm", "-f", root.draftPath()]
+    }
+
     FloatingWindow {
         id: panel
         title: "Multica Quick Add"
@@ -453,6 +526,14 @@ ShellRoot {
         color: "transparent"
 
         onClosed: root.hidePanel()
+
+        // Window-level Esc: dismiss even when a ComboBox still has focus
+        // (dropdowns otherwise swallow Escape after a project/agent pick).
+        Shortcut {
+            sequence: "Escape"
+            context: Qt.WindowShortcut
+            onActivated: root.hidePanel()
+        }
 
         // Soft outer glow / shadow stack
         Rectangle {
@@ -591,7 +672,10 @@ ShellRoot {
                         enabled: !root.busy && root.workspaceModel.length > 0
                         Layout.preferredWidth: 1
                         Layout.fillWidth: true
-                        onActivated: root.persistSelection()
+                        onActivated: {
+                            root.persistSelection();
+                            root.focusPrompt();
+                        }
                     }
 
                     DarkCombo {
@@ -599,7 +683,10 @@ ShellRoot {
                         model: root.projectModel
                         Layout.preferredWidth: 1
                         Layout.fillWidth: true
-                        onActivated: root.persistSelection()
+                        onActivated: {
+                            root.persistSelection();
+                            root.focusPrompt();
+                        }
                     }
 
                     DarkCombo {
@@ -608,7 +695,10 @@ ShellRoot {
                         enabled: !root.busy && root.createdByModel.length > 0
                         Layout.preferredWidth: 1.2
                         Layout.fillWidth: true
-                        onActivated: root.persistSelection()
+                        onActivated: {
+                            root.persistSelection();
+                            root.focusPrompt();
+                        }
                     }
 
                     Button {

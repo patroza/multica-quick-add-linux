@@ -130,6 +130,9 @@ class MulticaPanel(Adw.Application):
         self._send: Gtk.Button | None = None
         self._visible = False
         self._applying = False
+        self._draft_path = Path(
+            os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state")
+        ) / "multica-quick-add" / "draft.txt"
 
     def do_activate(self) -> None:  # noqa: N802
         # Single-instance: re-invoking the hotkey toggles close.
@@ -255,14 +258,36 @@ class MulticaPanel(Adw.Application):
         self._reload_async()
 
     def _dismiss(self) -> None:
+        # Keep unsaved prompt as draft (cleared only on successful send)
         if self._prompt:
+            text = self._prompt_text()
+            # _prompt_text strips; use raw buffer for draft fidelity
             buf = self._prompt.get_buffer()
+            start = buf.get_start_iter()
+            end = buf.get_end_iter()
+            raw = buf.get_text(start, end, True)
+            self._save_draft(raw)
             buf.set_text("", -1)
         self._set_status("", False)
         if self._win:
             self._win.hide()
         self._visible = False
-        # Stay alive for fast re-toggle; quit fully if user wants clean process via Esc twice? hide is enough.
+
+    def _save_draft(self, text: str) -> None:
+        try:
+            self._draft_path.parent.mkdir(parents=True, exist_ok=True)
+            if not text:
+                self._draft_path.unlink(missing_ok=True)
+            else:
+                self._draft_path.write_text(text, encoding="utf-8")
+        except OSError:
+            pass
+
+    def _clear_draft(self) -> None:
+        try:
+            self._draft_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def _focus_prompt(self) -> None:
         if self._prompt:
@@ -284,6 +309,7 @@ class MulticaPanel(Adw.Application):
         self._visible = False
 
     def _on_key(self, _ctrl, keyval, _keycode, state) -> bool:
+        # Window-level handler: Esc always dismisses (even after dropdown focus)
         if keyval == Gdk.KEY_Escape:
             self._dismiss()
             return True
@@ -363,6 +389,13 @@ class MulticaPanel(Adw.Application):
                     self._created.set_selected(len(agents) + i)
                     break
 
+        # Restore unsaved draft
+        draft = data.get("draft") or ""
+        if draft and self._prompt:
+            buf = self._prompt.get_buffer()
+            if buf.get_char_count() == 0:
+                buf.set_text(draft, -1)
+
         self._set_status("", False)
         if self._send:
             self._send.set_sensitive(True)
@@ -378,6 +411,8 @@ class MulticaPanel(Adw.Application):
         if self._applying:
             return
         self._persist_selection()
+        # Return focus to prompt so Esc isn't stuck on the dropdown
+        self._focus_prompt()
 
     def _persist_selection(self) -> None:
         data = self._bootstrap
@@ -504,9 +539,13 @@ class MulticaPanel(Adw.Application):
 
     def _send_ok(self, prompt: str) -> None:
         notify("Sent", prompt[:120])
+        self._clear_draft()
         if self._prompt:
             self._prompt.get_buffer().set_text("", -1)
-        self._dismiss()
+        self._set_status("", False)
+        if self._win:
+            self._win.hide()
+        self._visible = False
 
 
 def main() -> int:
