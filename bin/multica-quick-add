@@ -167,6 +167,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-notify)
       NO_NOTIFY=1
+      export MQA_NO_NOTIFY=1
       shift
       ;;
     --)
@@ -175,7 +176,7 @@ while [[ $# -gt 0 ]]; do
       break
       ;;
     -*)
-      mqa_die "Unknown flag: $1"
+      mqa_die "Unknown flag: $1" || exit 1
       ;;
     *)
       PROMPT_ARGS+=("$1")
@@ -183,6 +184,10 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$NO_NOTIFY" == "1" ]]; then
+  export MQA_NO_NOTIFY=1
+fi
 
 mqa_require_cmd jq
 mqa_ensure_dirs
@@ -208,22 +213,47 @@ if [[ -f "$MQA_CONFIG_PATH" ]]; then
   fi
 fi
 
-# --- pure selection mutations (Elephant submenus) ---
+# --- pure selection mutations (Elephant submenus / QS panel) ---
 if [[ -n "$SET_WORKSPACE_ID" || "$SET_PROJECT" == "1" || -n "$SET_AGENT_ID" || -n "$SET_SQUAD_ID" ]]; then
   mqa_require_cmd multica curl
   [[ "$_mqa_config_ok" == "1" ]] || mqa_die "Not logged in. Run multica login first."
-  if [[ -n "$SET_WORKSPACE_ID" ]]; then
-    mqa_set_workspace "$SET_WORKSPACE_ID"
+  # Resolve workspace for a single atomic write
+  _ws="${SET_WORKSPACE_ID:-}"
+  if [[ -z "$_ws" ]]; then
+    _ws="$(mqa_resolve_workspace_id "")"
   fi
+  [[ -n "$_ws" ]] || mqa_die "No workspace selected"
+  mqa_state_set last_workspace_id "$_ws"
+  _proj="$(mqa_ws_get "$_ws" project_id)"
+  _kind="$(mqa_ws_get "$_ws" created_by_kind)"
+  _cid="$(mqa_ws_get "$_ws" created_by_id)"
+  _cname="$(mqa_ws_get "$_ws" created_by_name)"
   if [[ "$SET_PROJECT" == "1" ]]; then
-    # Prefer explicit --set-workspace-id from the same invocation when present
-    mqa_set_project "${SET_WORKSPACE_ID:-}" "$SET_PROJECT_ID"
+    _proj="$(mqa_normalize_project_id "${SET_PROJECT_ID-}")"
   fi
   if [[ -n "$SET_AGENT_ID" ]]; then
-    mqa_set_created_by agent "$SET_AGENT_ID" ""
+    _kind="agent"
+    _cid="$SET_AGENT_ID"
+    _cname=""
   fi
   if [[ -n "$SET_SQUAD_ID" ]]; then
-    mqa_set_created_by squad "$SET_SQUAD_ID" ""
+    _kind="squad"
+    _cid="$SET_SQUAD_ID"
+    _cname=""
+  fi
+  if [[ -n "$_cid" && -z "$_cname" ]]; then
+    _cat="$(mqa_get_catalog "$_ws" 0 2>/dev/null || printf '{}')"
+    _cname="$(
+      printf '%s' "$_cat" | jq -r --arg k "${_kind:-agent}" --arg id "$_cid" '
+        if $k == "squad" then ((.squads // [])[] | select(.id == $id) | .name) // $id
+        else ((.agents // [])[] | select(.id == $id) | .name) // $id end' 2>/dev/null || printf '%s' "$_cid"
+    )"
+  fi
+  mqa_ws_set_selection "$_ws" "$_proj" "$_kind" "$_cid" "$_cname"
+  # Soft catalog warm for new workspace (non-blocking)
+  if [[ -n "$SET_WORKSPACE_ID" ]]; then
+    (mqa_get_catalog "$_ws" 1 >/dev/null 2>&1 || true) &
+    disown 2>/dev/null || true
   fi
   if [[ "$NO_NOTIFY" != "1" ]]; then
     sel="$(mqa_print_selection)"
@@ -270,8 +300,8 @@ if [[ -z "$WORKSPACE_ID" && -n "${MQA_DEFAULT_WORKSPACE_ID:-}" ]]; then
   WORKSPACE_ID="$MQA_DEFAULT_WORKSPACE_ID"
 fi
 
-# Bare --refresh must never open interactive pickers (Elephant warms cache this way).
-if [[ "$REFRESH" == "1" && "$CONFIGURE" != "1" && "$PICK" != "1" && ${#PROMPT_ARGS[@]} -eq 0 && -t 0 ]]; then
+# Bare --refresh must never open interactive pickers (Elephant / panels warm cache this way).
+if [[ "$REFRESH" == "1" && "$CONFIGURE" != "1" && "$PICK" != "1" && ${#PROMPT_ARGS[@]} -eq 0 ]]; then
   if [[ -z "$WORKSPACE_ID" ]]; then
     WORKSPACE_ID="$(mqa_list_workspaces | jq -r '.[0].id // empty' 2>/dev/null || true)"
   fi
@@ -321,7 +351,6 @@ if [[ "$PICK" == "1" ]]; then
 else
   PROJECT_ID="$(mqa_normalize_project_id "${PROJECT_ID:-}")"
 fi
-mqa_ws_set "$WORKSPACE_ID" project_id "${PROJECT_ID:-}"
 
 # --- created-by (agent | squad) ---
 CREATED_BY_KIND=""
@@ -379,9 +408,8 @@ if [[ -z "$CREATED_BY_NAME_RESOLVED" ]]; then
   )"
 fi
 
-mqa_ws_set "$WORKSPACE_ID" created_by_kind "$CREATED_BY_KIND"
-mqa_ws_set "$WORKSPACE_ID" created_by_id "$CREATED_BY_ID"
-mqa_ws_set "$WORKSPACE_ID" created_by_name "$CREATED_BY_NAME_RESOLVED"
+# One locked transaction for workspace + project + created-by
+mqa_ws_set_selection "$WORKSPACE_ID" "${PROJECT_ID:-}" "$CREATED_BY_KIND" "$CREATED_BY_ID" "$CREATED_BY_NAME_RESOLVED"
 
 if [[ "$CONFIGURE" == "1" ]]; then
   msg="workspace=$WORKSPACE_ID project=${PROJECT_ID:-none} → $CREATED_BY_NAME_RESOLVED"

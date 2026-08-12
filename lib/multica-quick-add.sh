@@ -83,6 +83,10 @@ mqa_read_prompt_tty() {
 mqa_notify() {
   local title="$1"
   local body="${2:-}"
+  if [[ "${MQA_NO_NOTIFY:-0}" == "1" ]]; then
+    printf '%s: %s\n' "$title" "$body" >&2
+    return 0
+  fi
   if command -v notify-send >/dev/null 2>&1; then
     notify-send --app-name="Multica Quick Add" "$title" "$body" || true
   else
@@ -104,7 +108,26 @@ mqa_require_cmd() {
 }
 
 mqa_ensure_dirs() {
-  mkdir -p "$MQA_STATE_DIR" "$MQA_CACHE_DIR"
+  # Private state: drafts and selection may contain confidential issue text
+  umask 077
+  mkdir -m 700 -p "$MQA_STATE_DIR" "$MQA_CACHE_DIR"
+  chmod 700 "$MQA_STATE_DIR" "$MQA_CACHE_DIR" 2>/dev/null || true
+}
+
+mqa_state_lock_file() {
+  printf '%s' "$MQA_STATE_DIR/.selections.lock"
+}
+
+mqa_atomic_write_file() {
+  # stdin → path (mode 600), same-dir temp + rename
+  local dest="$1"
+  local dir tmp
+  dir="$(dirname "$dest")"
+  mkdir -m 700 -p "$dir"
+  tmp="$(mktemp -p "$dir" ".tmp.XXXXXX")"
+  cat >"$tmp"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$dest"
 }
 
 mqa_draft_path() {
@@ -125,13 +148,14 @@ mqa_draft_write() {
   mqa_ensure_dirs
   local f tmp
   f="$(mqa_draft_path)"
-  tmp="$(mktemp)"
+  tmp="$(mktemp -p "$MQA_STATE_DIR" ".draft.XXXXXX")"
   cat >"$tmp"
   if [[ ! -s "$tmp" ]]; then
     rm -f "$tmp" "$f"
     return 0
   fi
-  mv "$tmp" "$f"
+  chmod 600 "$tmp"
+  mv -f "$tmp" "$f"
 }
 
 mqa_draft_clear() {
@@ -157,7 +181,8 @@ mqa_load_config() {
   )" || return 1
 
   IFS=$'\t' read -r MQA_SERVER_URL MQA_TOKEN MQA_DEFAULT_WORKSPACE_ID <<<"$parsed"
-  export MQA_SERVER_URL MQA_TOKEN MQA_DEFAULT_WORKSPACE_ID
+  # Never export MQA_TOKEN — keep it shell-local so children cannot scrape environ
+  export MQA_SERVER_URL MQA_DEFAULT_WORKSPACE_ID
 
   if [[ -z "${MQA_SERVER_URL:-}" || -z "${MQA_TOKEN:-}" ]]; then
     return 1
@@ -167,6 +192,24 @@ mqa_load_config() {
   MQA_SERVER_URL="${MQA_SERVER_URL%/}"
   export MQA_SERVER_URL
   return 0
+}
+
+# curl auth without putting the token on argv (uses -K config file).
+mqa_curl_with_auth() {
+  # usage: mqa_curl_with_auth [curl args...]
+  # Token is written to a 0600 temp config under state dir and removed after.
+  local cfg
+  mqa_ensure_dirs
+  cfg="$(mktemp -p "$MQA_STATE_DIR" ".curl.XXXXXX")"
+  # shellcheck disable=SC2064
+  trap 'rm -f "$cfg"' RETURN
+  # Escape double quotes in token for curl config syntax
+  local tok_esc
+  tok_esc="${MQA_TOKEN//\\/\\\\}"
+  tok_esc="${tok_esc//"/\\"}"
+  printf 'header = "Authorization: Bearer %s"\n' "$tok_esc" >"$cfg"
+  chmod 600 "$cfg"
+  curl -K "$cfg" "$@"
 }
 
 # Selections file shape (no dotted keys — those corrupted jq writes under race/old bugs):
@@ -200,16 +243,44 @@ mqa_state_read_object() {
 
 mqa_state_write_object() {
   local json="$1"
-  local file tmp
+  local file tmp lock
   file="$(mqa_state_file)"
+  lock="$(mqa_state_lock_file)"
   mqa_ensure_dirs
-  tmp="$(mktemp)"
   if ! printf '%s\n' "$json" | jq -e 'type == "object"' >/dev/null 2>&1; then
-    rm -f "$tmp"
     return 1
   fi
-  printf '%s\n' "$json" | jq '.' >"$tmp"
-  mv "$tmp" "$file"
+  (
+    flock 200
+    tmp="$(mktemp -p "$MQA_STATE_DIR" ".sel.XXXXXX")"
+    printf '%s\n' "$json" | jq '.' >"$tmp"
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$file"
+  ) 200>"$lock"
+}
+
+# Apply a jq program to selections.json under flock (one atomic transaction).
+# Usage: mqa_state_mutate <jq-program> [jq args...]
+mqa_state_mutate() {
+  local program="$1"
+  shift
+  local file lock obj tmp
+  file="$(mqa_state_file)"
+  lock="$(mqa_state_lock_file)"
+  mqa_ensure_dirs
+  (
+    flock 200
+    if [[ -f "$file" ]] && jq -e 'type == "object"' "$file" >/dev/null 2>&1; then
+      obj="$(cat "$file")"
+    else
+      obj='{}'
+    fi
+    obj="$(jq -c "$@" "$program" <<<"$obj")" || return 1
+    tmp="$(mktemp -p "$MQA_STATE_DIR" ".sel.XXXXXX")"
+    printf '%s\n' "$obj" | jq '.' >"$tmp"
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$file"
+  ) 200>"$lock"
 }
 
 mqa_state_get() {
@@ -223,10 +294,7 @@ mqa_state_get() {
 mqa_state_set() {
   local key="$1"
   local value="$2"
-  local obj
-  obj="$(mqa_state_read_object)"
-  obj="$(jq -c --arg k "$key" --arg v "$value" '.[$k] = $v' <<<"$obj")" || obj="{}"
-  mqa_state_write_object "$obj"
+  mqa_state_mutate '.[$k] = $v' --arg k "$key" --arg v "$value"
 }
 
 mqa_ws_get() {
@@ -239,16 +307,28 @@ mqa_ws_get() {
 
 mqa_ws_set() {
   local workspace_id="$1" field="$2" value="$3"
-  local obj
-  obj="$(mqa_state_read_object)"
-  obj="$(
-    jq -c --arg ws "$workspace_id" --arg f "$field" --arg v "$value" '
+  mqa_state_mutate '
       .workspaces = (.workspaces // {})
       | .workspaces[$ws] = (.workspaces[$ws] // {})
       | .workspaces[$ws][$f] = $v
-    ' <<<"$obj"
-  )" || return 1
-  mqa_state_write_object "$obj"
+    ' --arg ws "$workspace_id" --arg f "$field" --arg v "$value"
+}
+
+# One transaction for workspace selection snapshot (project + created-by).
+mqa_ws_set_selection() {
+  local workspace_id="$1"
+  local project_id="${2:-}"
+  local kind="${3:-}"
+  local id="${4:-}"
+  local name="${5:-}"
+  mqa_state_mutate '
+      .last_workspace_id = $ws
+      | .workspaces = (.workspaces // {})
+      | .workspaces[$ws] = ((.workspaces[$ws] // {})
+          + {project_id: $project_id}
+          + (if $kind != "" then {created_by_kind: $kind, created_by_id: $id, created_by_name: $name} else {} end))
+    ' --arg ws "$workspace_id" --arg project_id "$project_id" \
+      --arg kind "$kind" --arg id "$id" --arg name "$name"
 }
 
 mqa_cli_json() {
@@ -291,16 +371,32 @@ mqa_list_squads() {
 mqa_cache_catalog() {
   local workspace_id="$1"
   local file="$MQA_CACHE_DIR/catalog.$workspace_id.json"
-  local projects agents squads
-  projects="$(mqa_list_projects "$workspace_id")"
-  agents="$(mqa_list_agents "$workspace_id")"
-  squads="$(mqa_list_squads "$workspace_id" 2>/dev/null || printf '[]\n')"
-  jq -n \
-    --argjson projects "$projects" \
-    --argjson agents "$agents" \
-    --argjson squads "$squads" \
-    '{projects:$projects, agents:$agents, squads:$squads}' >"$file"
-  cat "$file"
+  local lock="$MQA_CACHE_DIR/catalog.$workspace_id.lock"
+  local projects agents squads tmp
+  mqa_ensure_dirs
+  (
+    # Single-flight: concurrent refreshers no-op if lock held
+    if ! flock -n 201; then
+      # Wait for peer and return whatever they wrote
+      flock 201
+      if [[ -f "$file" ]]; then
+        cat "$file"
+        exit 0
+      fi
+    fi
+    projects="$(mqa_list_projects "$workspace_id")"
+    agents="$(mqa_list_agents "$workspace_id")"
+    squads="$(mqa_list_squads "$workspace_id" 2>/dev/null || printf '[]\n')"
+    tmp="$(mktemp -p "$MQA_CACHE_DIR" ".catalog.XXXXXX")"
+    jq -n \
+      --argjson projects "$projects" \
+      --argjson agents "$agents" \
+      --argjson squads "$squads" \
+      '{projects:$projects, agents:$agents, squads:$squads}' >"$tmp"
+    chmod 600 "$tmp"
+    mv -f "$tmp" "$file"
+    cat "$file"
+  ) 201>"$lock"
 }
 
 mqa_get_catalog() {
@@ -461,9 +557,12 @@ mqa_upload_attachment() {
   local file_path="$2"
   local filename
   filename="$(basename "$file_path")"
-  curl -fsS \
+  # Reject form-injection characters in filename
+  if [[ "$filename" == *[\;\",]* ]]; then
+    mqa_die "Invalid attachment filename"
+  fi
+  mqa_curl_with_auth -fsS \
     -X POST \
-    -H "Authorization: Bearer $MQA_TOKEN" \
     -F "file=@${file_path};filename=${filename}" \
     "${MQA_SERVER_URL}/api/upload-file?workspace_id=${workspace_id}" \
     | jq -r '.id // empty'
@@ -509,12 +608,12 @@ mqa_quick_create() {
 
   local url response http_code body
   url="${MQA_SERVER_URL}/api/issues/quick-create?workspace_id=${workspace_id}"
+  # Token via -K config; body via stdin — neither appears on argv
   response="$(
-    curl -sS -w '\n%{http_code}' \
+    printf '%s' "$payload" | mqa_curl_with_auth -sS -w '\n%{http_code}' \
       -X POST \
-      -H "Authorization: Bearer $MQA_TOKEN" \
       -H "Content-Type: application/json" \
-      -d "$payload" \
+      -d @- \
       "$url"
   )" || mqa_die "Network error talking to Multica"
 
@@ -656,9 +755,12 @@ mqa_print_selection() {
 
 mqa_set_workspace() {
   local id="${1:?workspace id required}"
-  mqa_state_set last_workspace_id "$id"
-  # Ensure workspace bucket exists (preserve prior project/agent for this ws)
-  mqa_ws_set "$id" project_id "$(mqa_ws_get "$id" project_id)"
+  local project_id kind cid cname
+  project_id="$(mqa_ws_get "$id" project_id)"
+  kind="$(mqa_ws_get "$id" created_by_kind)"
+  cid="$(mqa_ws_get "$id" created_by_id)"
+  cname="$(mqa_ws_get "$id" created_by_name)"
+  mqa_ws_set_selection "$id" "$project_id" "$kind" "$cid" "$cname"
   # Soft background refresh — disown so set-* exits immediately
   (mqa_get_catalog "$id" 1 >/dev/null 2>&1 || true) &
   disown 2>/dev/null || true
@@ -691,9 +793,9 @@ mqa_set_created_by() {
       ' 2>/dev/null || printf '%s' "$id"
     )"
   fi
-  mqa_ws_set "$workspace_id" created_by_kind "$kind"
-  mqa_ws_set "$workspace_id" created_by_id "$id"
-  mqa_ws_set "$workspace_id" created_by_name "$name"
+  local project_id
+  project_id="$(mqa_ws_get "$workspace_id" project_id)"
+  mqa_ws_set_selection "$workspace_id" "$project_id" "$kind" "$id" "$name"
 }
 
 mqa_qs_config_dir() {
@@ -702,23 +804,32 @@ mqa_qs_config_dir() {
 
 mqa_ensure_qs_daemon() {
   command -v qs >/dev/null 2>&1 || mqa_die "quickshell (qs) is not installed"
-  # Already running for this config?
-  if qs list --all 2>/dev/null | grep -qi 'multica-quick-add'; then
-    return 0
-  fi
-  local cfg
+  local cfg lock
   cfg="$(mqa_qs_config_dir)"
   [[ -f "$cfg/shell.qml" ]] || mqa_die "Quickshell config missing at $cfg (run install.sh)"
-  # Detached daemon, one instance
-  qs -c multica-quick-add -n -d >/dev/null 2>&1 || qs -p "$cfg" -n -d >/dev/null 2>&1 || true
-  local i
-  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-    if qs list --all 2>/dev/null | grep -qi 'multica-quick-add'; then
-      return 0
+  mqa_ensure_dirs
+  lock="$MQA_STATE_DIR/.qs-daemon.lock"
+  (
+    flock 202
+    # Prefer IPC ping (never open/close — that would race the user)
+    if qs -c multica-quick-add ipc call panel ping >/dev/null 2>&1 \
+      || qs -p "$cfg" ipc call panel ping >/dev/null 2>&1; then
+      exit 0
     fi
-    sleep 0.15
-  done
-  return 0
+    if qs list --all 2>/dev/null | grep -qi 'multica-quick-add'; then
+      exit 0
+    fi
+    qs -c multica-quick-add -n -d >/dev/null 2>&1 || qs -p "$cfg" -n -d >/dev/null 2>&1 || true
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      if qs -c multica-quick-add ipc call panel ping >/dev/null 2>&1 \
+        || qs list --all 2>/dev/null | grep -qi 'multica-quick-add'; then
+        exit 0
+      fi
+      sleep 0.15
+    done
+    exit 1
+  ) 202>"$lock" || mqa_die "Quickshell Multica panel daemon failed to start"
 }
 
 mqa_gtk_panel_path() {
@@ -767,9 +878,7 @@ mqa_open_panel_qs() {
   if qs -p "$cfg" ipc call panel toggle >/dev/null 2>&1; then
     return 0
   fi
-  qs -c multica-quick-add -n >/dev/null 2>&1 &
-  sleep 0.4
-  qs -c multica-quick-add ipc call panel open >/dev/null 2>&1 || true
+  mqa_die "Quickshell Multica panel IPC failed (is the daemon running?)"
 }
 
 mqa_open_panel() {
