@@ -1,7 +1,7 @@
 # Multica Quick Add (Walker / Elephant) — Plan
 
 Fork of Tim Smart’s [multica-quick-add](https://github.com/tim-smart/multica-quick-add)
-for Linux desktops that already run Walker + Elephant (Omarchy / niri).
+for Linux desktops using Walker + Elephant.
 
 ## Goal
 

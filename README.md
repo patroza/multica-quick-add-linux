@@ -1,96 +1,112 @@
 # Multica Quick Add — Walker / Elephant
 
-Linux fork of [tim-smart/multica-quick-add](https://github.com/tim-smart/multica-quick-add): a Spotlight-style capture bar for sending thoughts to Multica agents.
+Linux port of [tim-smart/multica-quick-add](https://github.com/tim-smart/multica-quick-add): capture a free-text prompt from a global hotkey and submit it to Multica’s **quick-create** API so an agent or squad turns it into a well-formed issue.
 
-Tim’s original is a native macOS menu-bar panel. This version uses the stack you already run:
+The upstream project is a native macOS menu-bar app. This fork uses [Walker](https://github.com/abenz1267/walker) (UI) and [Elephant](https://github.com/abenz1267/elephant) (provider menus) on Wayland/Linux.
 
-| Layer | Role |
+| Component | Role |
 | --- | --- |
-| **Walker** | UI (dmenu free-text + pickers) |
-| **Elephant** | Provider backend + Lua menu of agents/squads |
-| **multica CLI** | Auth + catalog (`workspace` / `project` / `agent` / `squad` list) |
-| **Multica API** | `POST /api/issues/quick-create` (same endpoint Tim’s app uses) |
+| **Walker** | Free-text dmenu prompt and pickers |
+| **Elephant** | Optional agent/squad menu (`menus:multicaquickadd`) |
+| **multica CLI** | Auth and catalog (`workspace` / `project` / `agent` / `squad`) |
+| **Multica HTTP API** | `POST /api/issues/quick-create` |
 
 ## Requirements
 
-- Walker + Elephant (Omarchy defaults are fine)
-- `multica` CLI logged in (`multica setup`)
+- [Walker](https://github.com/abenz1267/walker) and [Elephant](https://github.com/abenz1267/elephant)
+- [Multica CLI](https://github.com/multica-ai/multica) configured and logged in (`multica setup` / `multica login`)
 - `jq`, `curl`, `notify-send`
+- Optional: `fzf` (terminal fallback when Walker is unavailable)
 
 ## Install
 
 ```sh
+git clone https://github.com/patroza/multica-quick-add-walker.git
+cd multica-quick-add-walker
 ./install.sh
 ```
 
-This:
+The install script:
 
-1. Symlinks `multica-quick-add` → `~/.local/bin`
-2. Symlinks the Elephant menu → `~/.config/elephant/menus/multicaquickadd.lua`
-3. Adds Walker provider `menus:multicaquickadd` + prefix `mqa`
-4. Restarts Walker/Elephant when possible
+1. Symlinks `multica-quick-add` into `~/.local/bin`
+2. Symlinks the Elephant menu into `~/.config/elephant/menus/`
+3. Registers the Walker provider `menus:multicaquickadd` and prefix `mqa` when a Walker config is present
+4. Restarts Walker/Elephant when helper commands are available
+
+Server URL and credentials come only from the local Multica CLI config (`~/.multica/config.json`). This repository does not ship instance URLs or tokens.
 
 ## Usage
 
 ```sh
-# Fast path: free-text prompt, last-used workspace/project/agent
+# Prompt with last-used workspace / project / agent
 multica-quick-add
 
-# First time / change defaults
+# Choose workspace, project, and agent first
 multica-quick-add --pick
+
+# Save defaults without submitting
 multica-quick-add --configure
 
-# Explicit
+# Non-interactive
 multica-quick-add --agent-id <uuid> "Investigate flaky checkout on mobile"
 echo "ship the pricing fix" | multica-quick-add --created-by "Pricing"
+multica-quick-add --attachment ./screenshot.png "UI glitch on settings"
 
-# From Walker
+# Walker menu
 walker -m menus:multicaquickadd
-# or type prefix: mqa
+# or type the prefix: mqa
 ```
 
-On success you get a notification: **Sent to \<agent\>** (the task is *enqueued*; Multica’s agent turns the prompt into a well-formed issue).
+Successful submit shows a notification: **Sent to \<agent\>**. Multica enqueues the quick-create task; the agent creates the issue asynchronously.
 
-## Suggested hotkey (niri)
+### Flags
 
-Tim uses **⌘⇧Space**. You already map **Ctrl+Shift+Space** to Walker itself. For Multica capture, add e.g.:
+| Flag | Description |
+| --- | --- |
+| `--pick` | Force workspace / project / created-by pickers |
+| `--configure` | Update last-used selections only |
+| `--refresh` | Refresh Multica catalog cache |
+| `--workspace-id` | Override workspace |
+| `--project-id` | Override project (omit or leave empty for none) |
+| `--agent-id` / `--squad-id` | Created-by target |
+| `--created-by NAME` | Fuzzy match agent or squad name |
+| `--attachment PATH` | Attach a file (repeatable) |
+| `--no-notify` | Print result to stdout instead of `notify-send` |
+
+### Example compositor bind (niri)
 
 ```kdl
 // ~/.config/niri/bindings.kdl
-Ctrl+Shift+M hotkey-overlay-title="Multica Quick Add" {
-  spawn-sh "multica-quick-add";
+Ctrl+Shift+Space hotkey-overlay-title="Multica Quick Add" {
+  spawn-sh "multica-quick-add --pick";
 }
-
-// Or open the agent menu first:
-// Ctrl+Shift+M { spawn-sh "omarchy-launch-walker -m menus:multicaquickadd"; }
 ```
 
-## How it maps to Tim’s app
+Any global hotkey that runs `multica-quick-add` (or `--pick`) works the same way under Hyprland, Sway, etc.
 
-| Tim (macOS) | This fork |
+## Comparison with upstream
+
+| Upstream (macOS) | This fork |
 | --- | --- |
-| Global hotkey → floating `NSPanel` | Global hotkey → Walker input-only dmenu |
-| Workspace / project / created-by pickers | Walker dmenu pickers (`--pick`) + remembered state |
-| `~/.multica/config.json` | Same |
+| Global hotkey → floating `NSPanel` | Walker `--dmenu --inputonly` |
+| In-panel pickers | Walker dmenu (`--pick`) + persisted last-used values |
 | Multica CLI for lists | Same |
-| Direct quick-create POST | Same |
-| Image paste/drop | `--attachment PATH` (paste pipeline later) |
+| Quick-create HTTP API | Same |
+| Image paste/drop | `--attachment PATH` |
 | Menu bar icon | Elephant menu + Walker prefix `mqa` |
 
-State lives in `~/.local/state/multica-quick-add/` (last selections + catalog cache).
+Local state (last selections and catalog cache) is stored under `~/.local/state/multica-quick-add/`.
 
-## Upstream plan
+API details match the upstream plan; see [plan-upstream.md](./plan-upstream.md).
 
-See [plan-upstream.md](./plan-upstream.md) (copied from Tim’s repo) for the verified Multica API contract.
-
-## Tests
+## Development
 
 ```sh
 ./tests/test-payload.sh
 ```
 
-## Status
+Payload construction and “no project” normalization are covered offline. End-to-end submit requires a logged-in Multica CLI.
 
-**Incubating.** Log in with the Multica CLI first (`multica setup` / `multica login` against your server). Offline unit tests cover payload shape only.
+## License
 
-Config and tokens stay in your local `~/.multica/config.json` — this repo never ships instance URLs or credentials.
+Same spirit as upstream: small utility, no warranty. Upstream Multica and Multica CLI remain under their own licenses.
