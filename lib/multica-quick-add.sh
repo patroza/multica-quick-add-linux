@@ -626,9 +626,10 @@ mqa_print_selection() {
 mqa_set_workspace() {
   local id="${1:?workspace id required}"
   mqa_state_set last_workspace_id "$id"
-  # Ensure workspace bucket exists
+  # Ensure workspace bucket exists (preserve prior project/agent for this ws)
   mqa_ws_set "$id" project_id "$(mqa_ws_get "$id" project_id)"
-  mqa_get_catalog "$id" 1 >/dev/null 2>&1 || true
+  # Soft background refresh — never block panel UI / set-* hot path
+  (mqa_get_catalog "$id" 1 >/dev/null 2>&1 || true) &
 }
 
 mqa_set_project() {
@@ -636,6 +637,7 @@ mqa_set_project() {
   workspace_id="$(mqa_resolve_workspace_id "${1:-}")"
   [[ -n "$workspace_id" ]] || mqa_die "No workspace selected"
   project_id="$(mqa_normalize_project_id "${2-}")"
+  mqa_state_set last_workspace_id "$workspace_id"
   mqa_ws_set "$workspace_id" project_id "$project_id"
 }
 
