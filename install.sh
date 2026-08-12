@@ -5,21 +5,22 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="${HOME}/.local/bin"
 ELEPHANT_MENUS="${HOME}/.config/elephant/menus"
+SHARE_DIR="${HOME}/.local/share/multica-quick-add"
 WALKER_CONFIG="${HOME}/.config/walker/config.toml"
 
-mkdir -p "$BIN_DIR" "$ELEPHANT_MENUS"
+mkdir -p "$BIN_DIR" "$ELEPHANT_MENUS" "$SHARE_DIR"
 
 ln -sfn "$ROOT/bin/multica-quick-add" "$BIN_DIR/multica-quick-add"
-chmod +x "$ROOT/bin/multica-quick-add" "$ROOT/bin/multica-quick-add"
+chmod +x "$ROOT/bin/multica-quick-add"
 
-# Hub + submenus + shared helpers
-for f in \
-  _multica_common.lua \
-  multicaquickadd.lua \
-  multicaworkspace.lua \
-  multicaproject.lua \
-  multicacreatedby.lua
-do
+# Shared Lua helper — NOT under menus/ (Elephant tries to load every .lua there as a menu).
+ln -sfn "$ROOT/elephant/lib/multica_common.lua" "$SHARE_DIR/multica_common.lua"
+
+# Remove stale common from menus if present (caused load errors / broken menu provider).
+rm -f "$ELEPHANT_MENUS/_multica_common.lua"
+
+# Hub + submenus
+for f in multicaquickadd.lua multicaworkspace.lua multicaproject.lua multicacreatedby.lua; do
   ln -sfn "$ROOT/elephant/menus/$f" "$ELEPHANT_MENUS/$f"
 done
 
@@ -55,10 +56,14 @@ else
   echo "No $WALKER_CONFIG found — skip walker wiring"
 fi
 
+# Hard restart Elephant + Walker service so menus reload and stale clients die.
 if command -v omarchy-restart-walker >/dev/null 2>&1; then
   omarchy-restart-walker || true
-elif command -v systemctl >/dev/null 2>&1; then
+else
   systemctl --user try-restart elephant.service 2>/dev/null || true
+  pkill -x elephant 2>/dev/null || true
+  # walker service is a plain process on many setups
+  pkill -x walker 2>/dev/null || true
 fi
 
 cat <<EOF
@@ -66,19 +71,13 @@ cat <<EOF
 Installed:
   $BIN_DIR/multica-quick-add
   hub:     $ELEPHANT_MENUS/multicaquickadd.lua
-  menus:   workspace · project · created-by (+ _multica_common.lua)
+  helper:  $SHARE_DIR/multica_common.lua
+  menus:   workspace · project · created-by
 
 Usage:
-  multica-quick-add --hub          # open Multica hub (recommended)
-  multica-quick-add                # capture with last selection
+  multica-quick-add --hub
   walker -m menus:multicaquickadd
   type prefix: mqa
 
-Suggested niri bind:
-  Super+Shift+Space {
-    spawn-sh "multica-quick-add --hub";
-  }
-
-Requires Multica CLI login:
-  multica setup
+If Walker shows empty results: omarchy-restart-walker
 EOF

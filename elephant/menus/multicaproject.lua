@@ -3,7 +3,8 @@
 local home = os.getenv("HOME") or ""
 do
   local candidates = {
-    home .. "/.config/elephant/menus/_multica_common.lua",
+    home .. "/.local/share/multica-quick-add/multica_common.lua",
+    home .. "/.config/elephant/lib/multica_common.lua",
   }
   local which = io.popen("command -v multica-quick-add 2>/dev/null")
   if which then
@@ -15,20 +16,26 @@ do
         local r = (root:read("*l") or ""):gsub("%s+$", "")
         root:close()
         if r ~= "" then
-          table.insert(candidates, 1, r .. "/elephant/menus/_multica_common.lua")
+          table.insert(candidates, 1, r .. "/elephant/lib/multica_common.lua")
         end
       end
     end
   end
-  for _, p in ipairs(candidates) do
-    local f = io.open(p, "r")
-    if f then
-      f:close()
-      common = dofile(p)
+  local loaded = false
+  for _, path in ipairs(candidates) do
+    local fh = io.open(path, "r")
+    if fh then
+      fh:close()
+      common = dofile(path)
+      loaded = true
       break
     end
   end
+  if not loaded then
+    error("multica: missing multica_common.lua (run install.sh)")
+  end
 end
+
 
 Name = "multicaproject"
 NamePretty = "Multica · Project"
