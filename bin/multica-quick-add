@@ -23,16 +23,16 @@ usage() {
 Multica Quick Add
 
 USAGE
-  multica-quick-add --panel          # GTK floating panel (this branch)
-  multica-quick-add --panel-gtk      # same as --panel
-  multica-quick-add --panel-qs       # Quickshell panel (main-branch UI)
+  multica-quick-add --panel          # Quickshell floating panel (default)
+  multica-quick-add --panel-gtk      # GTK4 comparison panel
+  multica-quick-add --panel-qs       # Alias for --panel
   multica-quick-add --hub            # Walker/Elephant hub (legacy)
   multica-quick-add [flags] [prompt...]
 
 FLAGS
-  --panel                Open GTK4/Adwaita panel (toggle if already running)
-  --panel-gtk            Alias for --panel
-  --panel-qs             Open Quickshell panel
+  --panel                Open Quickshell panel (toggle if daemon running)
+  --panel-gtk            Open GTK4/Adwaita panel
+  --panel-qs             Alias for --panel
   --hub                  Open Walker/Elephant Multica hub
   --pick                 Force CLI pickers then prompt
   --configure            Interactive pickers; save only
@@ -187,12 +187,12 @@ done
 mqa_require_cmd jq
 mqa_ensure_dirs
 
-if [[ "$PANEL" == "1" || "$PANEL_GTK" == "1" ]]; then
-  mqa_open_panel_gtk
+if [[ "$PANEL" == "1" || "$PANEL_QS" == "1" ]]; then
+  mqa_open_panel_qs
   exit 0
 fi
-if [[ "$PANEL_QS" == "1" ]]; then
-  mqa_open_panel_qs
+if [[ "$PANEL_GTK" == "1" ]]; then
+  mqa_open_panel_gtk
   exit 0
 fi
 if [[ "$HUB" == "1" ]]; then

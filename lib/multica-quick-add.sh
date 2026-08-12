@@ -723,7 +723,7 @@ mqa_open_panel_gtk() {
 }
 
 mqa_open_panel_qs() {
-  # Quickshell Tim-style floating panel (main branch / --panel-qs)
+  # Quickshell Tim-style floating panel (default --panel)
   mqa_ensure_qs_daemon
   if qs -c multica-quick-add ipc call panel toggle >/dev/null 2>&1; then
     return 0
@@ -739,8 +739,8 @@ mqa_open_panel_qs() {
 }
 
 mqa_open_panel() {
-  # gtk branch: --panel opens GTK
-  mqa_open_panel_gtk
+  # Default: Quickshell
+  mqa_open_panel_qs
 }
 
 mqa_open_hub() {
