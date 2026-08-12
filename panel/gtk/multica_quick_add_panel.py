@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Multica Quick Add — GTK4/Adwaita floating panel (gtk branch primary UI).
+"""Multica Quick Add — GTK4/Adwaita floating panel (comparison UI).
 
-Tim-style capture: live text entry + workspace / project / created-by pickers.
-Hotkey should run `multica-quick-add --panel` (single-instance; re-invoke toggles).
+Aligned with the Quickshell panel:
+- load Multica data before first show (no empty→full flash)
+- warm reopen keeps pickers + restores draft instantly, quiet refresh
+- draft text survives dismiss until successful Send
+- dropdown changes persist selection; focus returns to prompt
+- Esc dismisses; Enter = newline; Ctrl/Cmd/Super+Enter sends
 """
 
 from __future__ import annotations
@@ -114,6 +118,16 @@ def notify(title: str, body: str) -> None:
         )
 
 
+def _string_list_labels(model: Gtk.StringList | None) -> list[str]:
+    if model is None:
+        return []
+    return [model.get_string(i) for i in range(model.get_n_items())]
+
+
+def _same_labels(model: Gtk.StringList | None, labels: list[str]) -> bool:
+    return _string_list_labels(model) == labels
+
+
 class MulticaPanel(Adw.Application):
     def __init__(self) -> None:
         super().__init__(
@@ -132,6 +146,7 @@ class MulticaPanel(Adw.Application):
         self._applying = False
         self._ready_once = False
         self._last_draft = ""
+        self._busy = False
         self._draft_path = Path(
             os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state")
         ) / "multica-quick-add" / "draft.txt"
@@ -207,6 +222,10 @@ class MulticaPanel(Adw.Application):
         prompt.set_left_margin(12)
         prompt.set_right_margin(12)
         prompt.set_bottom_margin(10)
+        # Prompt-local keys (submit) — Esc handled at window CAPTURE
+        pkey = Gtk.EventControllerKey()
+        pkey.connect("key-pressed", self._on_prompt_key)
+        prompt.add_controller(pkey)
         scroll.set_child(prompt)
         frame.append(scroll)
         outer.append(frame)
@@ -233,7 +252,9 @@ class MulticaPanel(Adw.Application):
         status.set_ellipsize(Pango.EllipsizeMode.END)
         outer.append(status)
 
+        # CAPTURE so Esc dismisses even when a DropDown still has focus
         key = Gtk.EventControllerKey()
+        key.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         key.connect("key-pressed", self._on_key)
         win.add_controller(key)
 
@@ -249,26 +270,24 @@ class MulticaPanel(Adw.Application):
         self._status = status
         self._send = send
 
-        # Load data before first present so combos/draft don't flash empty→full
-        self._reload_async(reveal=True)
+        # Cold path: load before first present (matches Quickshell revealPending)
+        self._reload_async(reveal=True, quiet=False)
 
     def _present_existing(self) -> None:
         if not self._win:
             return
-        # Warm path: restore draft + show immediately, refresh quietly
-        if self._ready_once and self._prompt:
-            buf = self._prompt.get_buffer()
-            if self._last_draft:
-                buf.set_text(self._last_draft, -1)
-            self._win.present()
-            self._visible = True
-            self._focus_prompt()
-            self._reload_async(reveal=False)
+        # Warm path: draft + pickers already stable — show immediately
+        if self._ready_once and self._bootstrap.get("ok"):
+            if self._prompt:
+                buf = self._prompt.get_buffer()
+                buf.set_text(self._last_draft or "", -1)
+            self._set_status("", False)
+            self._reveal_window()
+            self._reload_async(reveal=False, quiet=True)
             return
-        self._reload_async(reveal=True)
+        self._reload_async(reveal=True, quiet=False)
 
     def _dismiss(self) -> None:
-        # Keep unsaved prompt as draft (cleared only on successful send)
         if self._prompt:
             buf = self._prompt.get_buffer()
             start = buf.get_start_iter()
@@ -278,9 +297,11 @@ class MulticaPanel(Adw.Application):
             self._save_draft(raw)
             buf.set_text("", -1)
         self._set_status("", False)
+        self._busy = False
         if self._win:
             self._win.hide()
         self._visible = False
+        # Leave dropdown models intact for warm reopen (QS parity)
 
     def _save_draft(self, text: str) -> None:
         try:
@@ -312,16 +333,18 @@ class MulticaPanel(Adw.Application):
 
     def _on_close(self, *_args) -> bool:
         self._dismiss()
-        return True  # prevent destroy; keep app for toggle
+        return True
 
     def _on_hide(self, *_args) -> None:
         self._visible = False
 
     def _on_key(self, _ctrl, keyval, _keycode, state) -> bool:
-        # Window-level handler: Esc always dismisses (even after dropdown focus)
         if keyval == Gdk.KEY_Escape:
             self._dismiss()
             return True
+        return False
+
+    def _on_prompt_key(self, _ctrl, keyval, _keycode, state) -> bool:
         submit_mod = (
             Gdk.ModifierType.CONTROL_MASK
             | Gdk.ModifierType.META_MASK
@@ -330,18 +353,19 @@ class MulticaPanel(Adw.Application):
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and (state & submit_mod):
             self._on_send(None)
             return True
+        # plain Enter → newline (default TextView)
         return False
 
-    def _reload_async(self, reveal: bool = False) -> None:
-        if reveal or not self._ready_once:
+    def _reload_async(self, reveal: bool = False, quiet: bool = False) -> None:
+        if not quiet and not self._ready_once:
             self._set_status("Loading…", error=False)
-        if self._send and (reveal or not self._ready_once):
-            self._send.set_sensitive(False)
+            if self._send:
+                self._send.set_sensitive(False)
 
         def work() -> None:
             try:
                 data = run_json(["mqa-bootstrap"])
-                GLib.idle_add(self._apply_bootstrap, data, reveal)
+                GLib.idle_add(self._apply_bootstrap, data, reveal, quiet)
             except Exception as exc:  # noqa: BLE001
                 GLib.idle_add(self._set_status, f"Load failed: {exc}", True)
                 GLib.idle_add(lambda: self._send.set_sensitive(True) if self._send else None)
@@ -355,12 +379,21 @@ class MulticaPanel(Adw.Application):
             self._win.present()
             self._visible = True
             self._focus_prompt()
+        elif self._visible:
+            self._focus_prompt()
         return False
 
-    def _apply_bootstrap(self, data: dict, reveal: bool = False) -> None:
+    def _apply_bootstrap(self, data: dict, reveal: bool = False, quiet: bool = False) -> None:
         self._bootstrap = data
         if not data.get("ok"):
-            self._set_status(data.get("message") or data.get("error") or "Not logged in", True)
+            if not quiet:
+                self._set_status(data.get("message") or data.get("error") or "Not logged in", True)
+                if self._ws:
+                    self._applying = True
+                    self._ws.set_model(Gtk.StringList.new(["—"]))
+                    self._proj.set_model(Gtk.StringList.new(["No project"]))
+                    self._created.set_model(Gtk.StringList.new(["—"]))
+                    GLib.idle_add(self._end_applying)
             if self._send:
                 self._send.set_sensitive(True)
             if reveal:
@@ -375,56 +408,80 @@ class MulticaPanel(Adw.Application):
 
         assert self._ws and self._proj and self._created
         self._applying = True
-        self._ws.set_model(Gtk.StringList.new([w.get("name") or w.get("id") for w in workspaces] or ["—"]))
-        self._proj.set_model(
-            Gtk.StringList.new(["No project"] + [p.get("title") or p.get("id") for p in projects])
-        )
+
+        ws_labels = [w.get("name") or w.get("id") for w in workspaces] or ["—"]
+        proj_labels = ["No project"] + [p.get("title") or p.get("id") for p in projects]
         created_labels = [f"Agent · {a.get('name')}" for a in agents] + [
             f"Squad · {s.get('name')}" for s in squads
-        ]
-        self._created.set_model(Gtk.StringList.new(created_labels or ["—"]))
+        ] or ["—"]
 
+        # Assign models only when labels change — avoids quiet-refresh flash
+        if not _same_labels(self._ws.get_model(), ws_labels):
+            self._ws.set_model(Gtk.StringList.new(ws_labels))
+        if not _same_labels(self._proj.get_model(), proj_labels):
+            self._proj.set_model(Gtk.StringList.new(proj_labels))
+        if not _same_labels(self._created.get_model(), created_labels):
+            self._created.set_model(Gtk.StringList.new(created_labels))
+
+        wi = 0
         ws_id = sel.get("workspace_id") or ""
         for i, w in enumerate(workspaces):
             if w.get("id") == ws_id:
-                self._ws.set_selected(i)
+                wi = i
                 break
+        pi = 0
         proj_id = sel.get("project_id") or ""
-        self._proj.set_selected(0)
         if proj_id:
             for i, p in enumerate(projects):
                 if p.get("id") == proj_id:
-                    self._proj.set_selected(i + 1)
+                    pi = i + 1
                     break
+        ci = 0
         kind = sel.get("created_by_kind") or ""
         cid = sel.get("created_by_id") or ""
-        self._created.set_selected(0)
         if kind == "agent":
             for i, a in enumerate(agents):
                 if a.get("id") == cid:
-                    self._created.set_selected(i)
+                    ci = i
                     break
         elif kind == "squad":
             for i, s in enumerate(squads):
                 if s.get("id") == cid:
-                    self._created.set_selected(len(agents) + i)
+                    ci = len(agents) + i
                     break
 
-        draft = data.get("draft") or ""
-        if isinstance(draft, str):
+        if self._ws.get_selected() != wi:
+            self._ws.set_selected(wi)
+        if self._proj.get_selected() != pi:
+            self._proj.set_selected(pi)
+        max_ci = max(0, len(created_labels) - 1)
+        ci = min(ci, max_ci)
+        if self._created.get_selected() != ci:
+            self._created.set_selected(ci)
+
+        # Draft: disk is durable; never replace text the user is already editing
+        draft = data.get("draft") if isinstance(data.get("draft"), str) else ""
+        if not self._last_draft and draft:
             self._last_draft = draft
         if self._prompt and self._prompt.get_buffer().get_char_count() == 0 and self._last_draft:
             self._prompt.get_buffer().set_text(self._last_draft, -1)
 
-        self._set_status("", False)
-        if self._send:
+        if not quiet:
+            self._set_status("", False)
+        if self._send and not self._busy:
             self._send.set_sensitive(True)
         self._ready_once = True
+
+        if not workspaces:
+            self._set_status("No workspaces — check multica auth", True)
+        elif not agents and not squads:
+            self._set_status("No agents/squads in workspace", True)
+
         if reveal:
             self._reveal_window()
-        else:
+        elif self._visible:
             self._focus_prompt()
-        # Defer so notify::selected from set_selected above is ignored
+
         GLib.idle_add(self._end_applying)
 
     def _end_applying(self) -> bool:
@@ -432,10 +489,9 @@ class MulticaPanel(Adw.Application):
         return False
 
     def _on_selection_changed(self, *_args) -> None:
-        if self._applying:
+        if self._applying or self._busy:
             return
         self._persist_selection()
-        # Return focus to prompt so Esc isn't stuck on the dropdown
         self._focus_prompt()
 
     def _persist_selection(self) -> None:
@@ -489,6 +545,8 @@ class MulticaPanel(Adw.Application):
         return buf.get_text(start, end, True).strip()
 
     def _on_send(self, _btn) -> None:
+        if self._busy:
+            return
         prompt = self._prompt_text()
         if not prompt:
             self._set_status("Type an issue first", True)
@@ -510,7 +568,7 @@ class MulticaPanel(Adw.Application):
         ws_id = workspaces[wi]["id"]
 
         pi = self._proj.get_selected()
-        proj_id = "" if pi <= 0 else projects[pi - 1]["id"]
+        proj_id = "" if pi <= 0 or pi - 1 >= len(projects) else projects[pi - 1]["id"]
 
         ci = self._created.get_selected()
         if ci < 0:
@@ -525,6 +583,7 @@ class MulticaPanel(Adw.Application):
                 return
             kind, cid = "squad", squads[si]["id"]
 
+        self._busy = True
         self._set_status("Sending…", error=False)
         if self._send:
             self._send.set_sensitive(False)
@@ -553,21 +612,28 @@ class MulticaPanel(Adw.Application):
                     GLib.idle_add(self._send_ok, prompt)
                 else:
                     err = (proc.stderr or proc.stdout or "Send failed").strip()
-                    GLib.idle_add(self._set_status, err.replace("error: ", ""), True)
-                    GLib.idle_add(lambda: self._send.set_sensitive(True) if self._send else None)
+                    GLib.idle_add(self._send_fail, err.replace("error: ", ""))
             except Exception as exc:  # noqa: BLE001
-                GLib.idle_add(self._set_status, str(exc), True)
-                GLib.idle_add(lambda: self._send.set_sensitive(True) if self._send else None)
+                GLib.idle_add(self._send_fail, str(exc))
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _send_fail(self, err: str) -> None:
+        self._busy = False
+        self._set_status(err or "Send failed", True)
+        if self._send:
+            self._send.set_sensitive(True)
 
     def _send_ok(self, prompt: str) -> None:
         notify("Sent", prompt[:120])
         self._clear_draft()
         self._last_draft = ""
+        self._busy = False
         if self._prompt:
             self._prompt.get_buffer().set_text("", -1)
         self._set_status("", False)
+        if self._send:
+            self._send.set_sensitive(True)
         if self._win:
             self._win.hide()
         self._visible = False
