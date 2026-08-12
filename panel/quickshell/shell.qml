@@ -28,7 +28,8 @@ ShellRoot {
             projects: [],
             agents: [],
             squads: [],
-            selection: ({})
+            selection: ({}),
+            draft: ""
         })
     property var workspaceModel: []
     property var projectModel: ["No project"]
@@ -39,6 +40,12 @@ ShellRoot {
     property int bootGen: 0
     // Suppress persist while restoring combos from bootstrap
     property bool applyingSelection: false
+    // First successful bootstrap finished — UI models are warm
+    property bool readyOnce: false
+    // Show only after bootstrap so combos/draft don't flash empty→full
+    property bool revealPending: false
+    // In-memory draft so reopen is instant (disk is the durable copy)
+    property string lastDraft: ""
 
     function homeBin(name) {
         const home = Quickshell.env("HOME") || "";
@@ -58,22 +65,49 @@ ShellRoot {
         });
     }
 
-    function showPanel() {
-        // Order matters: never throw before reloadBootstrap.
-        panel.visible = true;
-        reloadBootstrap();
+    function modelKey(list) {
+        return (list || []).join("\u0001");
+    }
+
+    function revealPanel() {
+        if (!panel.visible)
+            panel.visible = true;
+        root.revealPending = false;
         focusPrompt();
+    }
+
+    function showPanel() {
+        if (panel.visible) {
+            focusPrompt();
+            return;
+        }
+        // Warm path: models + draft already stable — show immediately, refresh quietly
+        if (root.readyOnce && root.bootstrap.ok) {
+            if (promptField)
+                promptField.text = root.lastDraft;
+            statusText = "";
+            revealPanel();
+            reloadBootstrap(true);
+            return;
+        }
+        // Cold path: load first, then show (no empty flash)
+        root.revealPending = true;
+        reloadBootstrap(false);
     }
 
     function hidePanel() {
         // Keep unsaved prompt as draft (cleared only on successful send)
-        saveDraft(promptField ? promptField.text : "");
+        const text = promptField ? promptField.text : "";
+        root.lastDraft = text;
+        saveDraft(text);
         panel.visible = false;
+        root.revealPending = false;
         if (promptField)
             promptField.text = "";
         statusText = "";
         statusIsError = true;
         busy = false;
+        // Leave combo models intact so the next open is already populated
     }
 
     function saveDraft(text) {
@@ -104,12 +138,16 @@ ShellRoot {
         statusIsError = isError !== false;
     }
 
-    function reloadBootstrap() {
-        busy = true;
-        setStatus("Loading…", false);
+    // quiet=true: background refresh while panel already shows stable content
+    function reloadBootstrap(quiet) {
+        const isQuiet = quiet === true;
+        if (!isQuiet && !root.readyOnce)
+            setStatus("Loading…", false);
+        if (!isQuiet)
+            busy = true;
         bootGen += 1;
         const gen = bootGen;
-        // Restart process reliably (same-frame false→true is flaky).
+        bootstrapProc.quiet = isQuiet;
         bootstrapProc.running = false;
         Qt.callLater(() => {
             if (gen !== root.bootGen)
@@ -172,14 +210,17 @@ ShellRoot {
 
         root.applyingSelection = true;
 
-        // Reassign via empty first so ComboBox refreshes reliably.
-        root.workspaceModel = [];
-        root.projectModel = ["No project"];
-        root.createdByModel = [];
+        const nextWs = workspaces.map(w => w.name || w.id);
+        const nextProj = ["No project"].concat(projects.map(p => p.title || p.id));
+        const nextCb = agents.map(a => "Agent · " + (a.name || a.id)).concat(squads.map(s => "Squad · " + (s.name || s.id)));
 
-        root.workspaceModel = workspaces.map(w => w.name || w.id);
-        root.projectModel = ["No project"].concat(projects.map(p => p.title || p.id));
-        root.createdByModel = agents.map(a => "Agent · " + (a.name || a.id)).concat(squads.map(s => "Squad · " + (s.name || s.id)));
+        // Assign directly — never blank to [] first (that flashes empty rows).
+        if (modelKey(root.workspaceModel) !== modelKey(nextWs))
+            root.workspaceModel = nextWs;
+        if (modelKey(root.projectModel) !== modelKey(nextProj))
+            root.projectModel = nextProj;
+        if (modelKey(root.createdByModel) !== modelKey(nextCb))
+            root.createdByModel = nextCb;
 
         let wi = 0;
         for (let i = 0; i < workspaces.length; i++) {
@@ -216,15 +257,18 @@ ShellRoot {
             }
         }
 
-        // Apply indices after models bind (same-frame currentIndex is often dropped).
-        Qt.callLater(() => {
-            workspaceBox.currentIndex = wi;
-            projectBox.currentIndex = pi;
-            createdByBox.currentIndex = Math.min(ci, Math.max(0, root.createdByModel.length - 1));
-            Qt.callLater(() => {
-                root.applyingSelection = false;
-            });
-        });
+        const applyIdx = () => {
+            if (workspaceBox.currentIndex !== wi)
+                workspaceBox.currentIndex = wi;
+            if (projectBox.currentIndex !== pi)
+                projectBox.currentIndex = pi;
+            const cbi = Math.min(ci, Math.max(0, root.createdByModel.length - 1));
+            if (createdByBox.currentIndex !== cbi)
+                createdByBox.currentIndex = cbi;
+            root.applyingSelection = false;
+        };
+        // One frame later so ComboBox has bound the new model when it changed.
+        Qt.callLater(applyIdx);
     }
 
     function persistSelection() {
@@ -394,6 +438,7 @@ ShellRoot {
 
     Process {
         id: bootstrapProc
+        property bool quiet: false
         running: false
         command: ["true"]
         stdout: StdioCollector {
@@ -402,7 +447,10 @@ ShellRoot {
                 root.busy = false;
                 const raw = text.trim();
                 if (!raw) {
-                    root.setStatus("Bootstrap returned empty output", true);
+                    if (!bootstrapProc.quiet)
+                        root.setStatus("Bootstrap returned empty output", true);
+                    if (root.revealPending)
+                        root.revealPanel();
                     return;
                 }
                 try {
@@ -410,25 +458,38 @@ ShellRoot {
                     root.bootstrap = data;
                     if (!data.ok) {
                         root.setStatus(data.message || data.error || "Not logged in", true);
-                        root.workspaceModel = [];
-                        root.projectModel = ["No project"];
-                        root.createdByModel = [];
+                        if (!bootstrapProc.quiet) {
+                            root.workspaceModel = [];
+                            root.projectModel = ["No project"];
+                            root.createdByModel = [];
+                        }
                     } else {
-                        root.setStatus("", false);
+                        if (!bootstrapProc.quiet || !root.statusIsError)
+                            root.setStatus("", false);
                         root.applySelectionToCombos();
-                        // Restore unsaved draft (do not clobber if user already typed)
-                        if (typeof data.draft === "string" && data.draft.length > 0) {
-                            if (!promptField.text || promptField.text.length === 0)
-                                promptField.text = data.draft;
+                        // Prefer in-memory lastDraft when reopening; else disk draft from bootstrap
+                        if (typeof data.draft === "string")
+                            root.lastDraft = data.draft;
+                        if (promptField && (!promptField.text || promptField.text.length === 0)) {
+                            if (root.lastDraft && root.lastDraft.length > 0)
+                                promptField.text = root.lastDraft;
                         }
                         if (!(data.workspaces || []).length)
                             root.setStatus("No workspaces — check multica auth", true);
                         else if (!(data.agents || []).length && !(data.squads || []).length)
                             root.setStatus("No agents/squads in workspace", true);
+                        root.readyOnce = true;
                     }
-                    root.focusPrompt();
+                    // Reveal only after models/draft applied — no empty→full flash
+                    if (root.revealPending)
+                        root.revealPanel();
+                    else if (panel.visible)
+                        root.focusPrompt();
                 } catch (e) {
-                    root.setStatus("Failed to parse Multica data", true);
+                    if (!bootstrapProc.quiet)
+                        root.setStatus("Failed to parse Multica data", true);
+                    if (root.revealPending)
+                        root.revealPanel();
                 }
             }
         }
@@ -437,10 +498,15 @@ ShellRoot {
         }
         onExited: code => {
             root.busy = false;
-            if (code !== 0 && !root.statusText)
+            if (code !== 0 && !root.statusText && !bootstrapProc.quiet)
                 root.setStatus("Bootstrap failed (is multica logged in?)", true);
+            if (root.revealPending && code !== 0)
+                root.revealPanel();
         }
     }
+
+    // Warm catalog + draft at daemon start so the first hotkey open is already stable
+    Component.onCompleted: reloadBootstrap(true)
 
     Process {
         id: persistProc
@@ -478,10 +544,12 @@ ShellRoot {
                     notifyProc.running = true;
                 });
                 promptField.text = "";
+                root.lastDraft = "";
                 root.setStatus("", false);
                 root.clearDraft();
                 // Skip draft save on successful send
                 panel.visible = false;
+                root.revealPending = false;
                 statusText = "";
                 statusIsError = true;
                 busy = false;
