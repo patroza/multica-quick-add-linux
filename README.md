@@ -2,11 +2,13 @@
 
 Linux port of [tim-smart/multica-quick-add](https://github.com/tim-smart/multica-quick-add): a Spotlight-style capture bar that sends free-text prompts to Multica’s **quick-create** API.
 
+The **`gtk` branch** keeps a full GTK4 panel for side-by-side comparison. **Default UI is Quickshell.**
+
 ## UIs (pick one)
 
 | UI | Command | Notes |
 | --- | --- | --- |
-| **Quickshell panel** (recommended) | `multica-quick-add --panel` | Real floating window: live typing + dropdowns (Tim-like) |
+| **Quickshell panel** (default) | `multica-quick-add --panel` | Real floating window: live typing + dropdowns (Tim-like) |
 | **GTK4 panel** | `multica-quick-add --panel-gtk` | Same idea in GTK/Adwaita for comparison |
 | **Walker hub** (legacy) | `multica-quick-add --hub` | List/submenu experiment; not great for free-text |
 
@@ -74,8 +76,8 @@ qs -c multica-quick-add ipc call panel close
 bin/multica-quick-add      # CLI + launchers
 bin/mqa-bootstrap          # JSON bootstrap for panels
 lib/multica-quick-add.sh   # shared Multica API / state
-panel/quickshell/shell.qml # Quickshell UI
-panel/gtk/...panel.py      # GTK UI
+panel/quickshell/shell.qml # Quickshell UI (default)
+panel/gtk/...panel.py      # GTK UI (comparison)
 elephant/menus/            # legacy Walker hub
 ```
 

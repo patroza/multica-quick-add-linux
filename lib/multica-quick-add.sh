@@ -687,32 +687,60 @@ mqa_ensure_qs_daemon() {
   return 0
 }
 
-mqa_open_panel() {
-  # Quickshell Tim-style floating panel
-  mqa_ensure_qs_daemon
-  if qs -c multica-quick-add ipc call panel toggle >/dev/null 2>&1; then
-    return 0
-  fi
-  # Fallback: path-based instance
-  local cfg
-  cfg="$(mqa_qs_config_dir)"
-  if qs -p "$cfg" ipc call panel toggle >/dev/null 2>&1; then
-    return 0
-  fi
-  # Last resort: launch visible once (non-daemon)
-  qs -c multica-quick-add -n >/dev/null 2>&1 &
-  sleep 0.4
-  qs -c multica-quick-add ipc call panel open >/dev/null 2>&1 || true
-}
-
-mqa_open_panel_gtk() {
+mqa_gtk_panel_path() {
   local panel
   panel="${MQA_ROOT}/panel/gtk/multica_quick_add_panel.py"
   if [[ ! -f "$panel" ]]; then
     panel="$HOME/pj/macs/multica-quick-add-linux/panel/gtk/multica_quick_add_panel.py"
   fi
   [[ -f "$panel" ]] || mqa_die "GTK panel not found"
-  exec python3 "$panel"
+  printf '%s' "$panel"
+}
+
+mqa_open_panel_gtk() {
+  # GTK4/Adwaita panel (primary on the gtk branch). Single-instance via GApplication;
+  # re-running toggles visibility. Prefer gtk4-layer-shell via LD_PRELOAD when present.
+  local panel preload=""
+  panel="$(mqa_gtk_panel_path)"
+  for cand in \
+    /usr/lib/libgtk4-layer-shell.so \
+    /usr/lib/libgtk4-layer-shell.so.0 \
+    /usr/lib64/libgtk4-layer-shell.so \
+    /usr/lib64/libgtk4-layer-shell.so.0; do
+    if [[ -f "$cand" ]]; then
+      preload="$cand"
+      break
+    fi
+  done
+  # Detach so the hotkey spawn returns immediately; GApplication activates an
+  # already-running instance if one exists.
+  if [[ -n "$preload" ]]; then
+    env -u BASH_ENV LD_PRELOAD="$preload${LD_PRELOAD:+:$LD_PRELOAD}" python3 "$panel" >/dev/null 2>&1 &
+  else
+    env -u BASH_ENV python3 "$panel" >/dev/null 2>&1 &
+  fi
+  disown 2>/dev/null || true
+}
+
+mqa_open_panel_qs() {
+  # Quickshell Tim-style floating panel (default --panel)
+  mqa_ensure_qs_daemon
+  if qs -c multica-quick-add ipc call panel toggle >/dev/null 2>&1; then
+    return 0
+  fi
+  local cfg
+  cfg="$(mqa_qs_config_dir)"
+  if qs -p "$cfg" ipc call panel toggle >/dev/null 2>&1; then
+    return 0
+  fi
+  qs -c multica-quick-add -n >/dev/null 2>&1 &
+  sleep 0.4
+  qs -c multica-quick-add ipc call panel open >/dev/null 2>&1 || true
+}
+
+mqa_open_panel() {
+  # Default: Quickshell
+  mqa_open_panel_qs
 }
 
 mqa_open_hub() {

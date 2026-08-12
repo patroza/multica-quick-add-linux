@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install Multica Quick Add (Quickshell panel + GTK panel + CLI + optional Walker hub).
+# Install Multica Quick Add (Quickshell default + GTK comparison + optional Walker hub).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -67,7 +67,7 @@ Installed:
   systemd:    multica-quick-add-qs.service (enable if graphical user session)
 
 Open:
-  multica-quick-add --panel       # Quickshell (recommended)
+  multica-quick-add --panel       # Quickshell (default)
   multica-quick-add --panel-gtk   # GTK comparison
   multica-quick-add --hub         # Walker legacy hub
 
