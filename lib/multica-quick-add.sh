@@ -362,14 +362,29 @@ mqa_pick_id_from_labeled() {
   printf '%s\n' "$id"
 }
 
+mqa_close_walker() {
+  # Hub Capture runs while Walker is already open; a second dmenu loses the bus
+  # name / gets cancelled. Close the hub first, then open the prompt.
+  if command -v walker >/dev/null 2>&1; then
+    walker --close >/dev/null 2>&1 || walker -q >/dev/null 2>&1 || true
+  fi
+  # Brief settle so GApplication service is ready for a new client.
+  sleep 0.2
+}
+
 mqa_prompt_text() {
   local placeholder="${1:-Describe an issue}"
   local hint="${2:-}"
   local full="$placeholder"
   if [[ -n "$hint" ]]; then
-    full="$placeholder  ·  $hint"
+    # Keep ASCII-only separators — some locales break on middle-dot in GTK.
+    full="$placeholder ($hint)"
   fi
   local text=""
+
+  # Always release the hub window before prompting.
+  mqa_close_walker
+
   if command -v walker >/dev/null 2>&1 && [[ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ]]; then
     # Free-text capture: input-only dmenu (Spotlight-style single field).
     text="$(
@@ -378,10 +393,29 @@ mqa_prompt_text() {
         --inputonly \
         --placeholder "$full" \
         --width 720 \
-        --minheight 80 \
-        --maxheight 120 \
+        --minheight 100 \
+        --maxheight 140 \
         </dev/null || true
     )"
+  fi
+  text="$(printf '%s' "$text" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+  # Fallbacks when Walker is busy / cancelled (zenity / yad / wofi / fzf / TTY).
+  if [[ -z "$text" ]] && command -v zenity >/dev/null 2>&1; then
+    text="$(
+      zenity --entry --title="Multica Quick Add" --text="$full" --width=520 2>/dev/null || true
+    )"
+  fi
+  if [[ -z "$text" ]] && command -v yad >/dev/null 2>&1; then
+    text="$(
+      yad --entry --title="Multica Quick Add" --text="$full" --width=520 2>/dev/null || true
+    )"
+  fi
+  if [[ -z "$text" ]] && command -v wofi >/dev/null 2>&1; then
+    text="$(printf '' | wofi --dmenu --prompt "$full" 2>/dev/null || true)"
+  fi
+  if [[ -z "$text" ]] && command -v fuzzel >/dev/null 2>&1; then
+    text="$(printf '' | fuzzel --dmenu --prompt "$full " 2>/dev/null || true)"
   fi
   text="$(printf '%s' "$text" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   if [[ -z "$text" ]]; then

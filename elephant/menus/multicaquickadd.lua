@@ -79,7 +79,7 @@ function GetEntries(_query)
       Value = "capture",
       Icon = common.icon_capture(),
       Keywords = { "capture", "send", "issue", "new", agent, proj },
-      Actions = { open = "lua:Capture" },
+      Actions = { send = "lua:Capture" },
     })
   else
     table.insert(entries, {
@@ -88,7 +88,7 @@ function GetEntries(_query)
       Value = "capture-disabled",
       Icon = common.icon_capture(),
       Keywords = { "capture" },
-      Actions = { open = "lua:NeedAgent" },
+      Actions = { send = "lua:NeedAgent" },
     })
   end
 

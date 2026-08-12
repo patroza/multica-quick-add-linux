@@ -134,8 +134,15 @@ function M.set_and_return(args)
 end
 
 function M.capture()
-  M.run_bg(M.shell_quote(M.script()))
+  -- Close hub first (walker can't host hub + prompt dmenu at once), then prompt.
+  -- Small delay so Walker releases the bus name before the capture process starts.
+  M.run_bg(
+    "walker --close >/dev/null 2>&1 || walker -q >/dev/null 2>&1 || true; "
+      .. "sleep 0.25; "
+      .. M.shell_quote(M.script())
+  )
 end
+
 
 function M.icon_agent()
   return "user-available"
