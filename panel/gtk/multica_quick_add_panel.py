@@ -130,6 +130,8 @@ class MulticaPanel(Adw.Application):
         self._send: Gtk.Button | None = None
         self._visible = False
         self._applying = False
+        self._ready_once = False
+        self._last_draft = ""
         self._draft_path = Path(
             os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state")
         ) / "multica-quick-add" / "draft.txt"
@@ -247,25 +249,32 @@ class MulticaPanel(Adw.Application):
         self._status = status
         self._send = send
 
-        self._present_existing()
+        # Load data before first present so combos/draft don't flash empty→full
+        self._reload_async(reveal=True)
 
     def _present_existing(self) -> None:
         if not self._win:
             return
-        self._win.present()
-        self._visible = True
-        self._focus_prompt()
-        self._reload_async()
+        # Warm path: restore draft + show immediately, refresh quietly
+        if self._ready_once and self._prompt:
+            buf = self._prompt.get_buffer()
+            if self._last_draft:
+                buf.set_text(self._last_draft, -1)
+            self._win.present()
+            self._visible = True
+            self._focus_prompt()
+            self._reload_async(reveal=False)
+            return
+        self._reload_async(reveal=True)
 
     def _dismiss(self) -> None:
         # Keep unsaved prompt as draft (cleared only on successful send)
         if self._prompt:
-            text = self._prompt_text()
-            # _prompt_text strips; use raw buffer for draft fidelity
             buf = self._prompt.get_buffer()
             start = buf.get_start_iter()
             end = buf.get_end_iter()
             raw = buf.get_text(start, end, True)
+            self._last_draft = raw
             self._save_draft(raw)
             buf.set_text("", -1)
         self._set_status("", False)
@@ -323,27 +332,39 @@ class MulticaPanel(Adw.Application):
             return True
         return False
 
-    def _reload_async(self) -> None:
-        self._set_status("Loading…", error=False)
-        if self._send:
+    def _reload_async(self, reveal: bool = False) -> None:
+        if reveal or not self._ready_once:
+            self._set_status("Loading…", error=False)
+        if self._send and (reveal or not self._ready_once):
             self._send.set_sensitive(False)
 
         def work() -> None:
             try:
                 data = run_json(["mqa-bootstrap"])
-                GLib.idle_add(self._apply_bootstrap, data)
+                GLib.idle_add(self._apply_bootstrap, data, reveal)
             except Exception as exc:  # noqa: BLE001
                 GLib.idle_add(self._set_status, f"Load failed: {exc}", True)
                 GLib.idle_add(lambda: self._send.set_sensitive(True) if self._send else None)
+                if reveal:
+                    GLib.idle_add(self._reveal_window)
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _apply_bootstrap(self, data: dict) -> None:
+    def _reveal_window(self) -> bool:
+        if self._win and not self._visible:
+            self._win.present()
+            self._visible = True
+            self._focus_prompt()
+        return False
+
+    def _apply_bootstrap(self, data: dict, reveal: bool = False) -> None:
         self._bootstrap = data
         if not data.get("ok"):
             self._set_status(data.get("message") or data.get("error") or "Not logged in", True)
             if self._send:
                 self._send.set_sensitive(True)
+            if reveal:
+                self._reveal_window()
             return
 
         workspaces = data.get("workspaces") or []
@@ -389,17 +410,20 @@ class MulticaPanel(Adw.Application):
                     self._created.set_selected(len(agents) + i)
                     break
 
-        # Restore unsaved draft
         draft = data.get("draft") or ""
-        if draft and self._prompt:
-            buf = self._prompt.get_buffer()
-            if buf.get_char_count() == 0:
-                buf.set_text(draft, -1)
+        if isinstance(draft, str):
+            self._last_draft = draft
+        if self._prompt and self._prompt.get_buffer().get_char_count() == 0 and self._last_draft:
+            self._prompt.get_buffer().set_text(self._last_draft, -1)
 
         self._set_status("", False)
         if self._send:
             self._send.set_sensitive(True)
-        self._focus_prompt()
+        self._ready_once = True
+        if reveal:
+            self._reveal_window()
+        else:
+            self._focus_prompt()
         # Defer so notify::selected from set_selected above is ignored
         GLib.idle_add(self._end_applying)
 
@@ -540,6 +564,7 @@ class MulticaPanel(Adw.Application):
     def _send_ok(self, prompt: str) -> None:
         notify("Sent", prompt[:120])
         self._clear_draft()
+        self._last_draft = ""
         if self._prompt:
             self._prompt.get_buffer().set_text("", -1)
         self._set_status("", False)
