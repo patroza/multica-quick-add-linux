@@ -1,0 +1,311 @@
+#!/usr/bin/env bash
+# Multica Quick Add — Walker/Elephant (Linux) fork of
+# https://github.com/tim-smart/multica-quick-add
+#
+# Global-hotkey style capture: free-text prompt → Multica quick-create API.
+# Default: reuse last workspace / project / agent. Use --pick to reselect.
+
+set -euo pipefail
+
+# Resolve through symlinks (install puts ~/.local/bin/multica-quick-add → repo/bin/…).
+_mqa_src="${BASH_SOURCE[0]}"
+while [[ -L "$_mqa_src" ]]; do
+  _mqa_dir="$(cd -P "$(dirname "$_mqa_src")" && pwd)"
+  _mqa_src="$(readlink "$_mqa_src")"
+  [[ "$_mqa_src" != /* ]] && _mqa_src="$_mqa_dir/$_mqa_src"
+done
+MQA_ROOT="$(cd -P "$(dirname "$_mqa_src")/.." && pwd)"
+unset _mqa_src _mqa_dir
+# shellcheck source=../lib/multica-quick-add.sh
+source "$MQA_ROOT/lib/multica-quick-add.sh"
+
+usage() {
+  cat <<'EOF'
+Multica Quick Add (Walker / Elephant)
+
+USAGE
+  multica-quick-add [flags] [prompt...]
+  multica-quick-add --pick
+  multica-quick-add --configure
+  multica-quick-add --refresh
+
+FLAGS
+  --pick                 Force workspace / project / agent pickers
+  --configure            Only update last-used selections (no submit)
+  --refresh              Refresh Multica catalog cache for current workspace
+  --workspace-id ID      Override workspace
+  --project-id ID        Override project (empty string clears)
+  --agent-id ID          Submit as this agent
+  --squad-id ID          Submit as this squad
+  --created-by NAME      Fuzzy name match against agents then squads
+  --attachment PATH      Attach a file (repeatable)
+  --no-notify            Print result to stdout instead of notify-send
+  -h, --help             Show this help
+
+FLOW
+  1. Resolve workspace (last used, config default, or picker)
+  2. Unless overrides given, reuse last project + created-by for that workspace
+  3. Capture prompt via Walker input-only dmenu (or argv / stdin)
+  4. POST /api/issues/quick-create and notify
+
+Requires: multica CLI logged in, walker, jq, curl, notify-send.
+EOF
+}
+
+PICK=0
+CONFIGURE=0
+REFRESH=0
+NO_NOTIFY=0
+WORKSPACE_ID=""
+PROJECT_ID=""
+PROJECT_ID_SET=0
+AGENT_ID=""
+SQUAD_ID=""
+CREATED_BY_NAME=""
+PROMPT_ARGS=()
+ATTACHMENTS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --pick)
+      PICK=1
+      shift
+      ;;
+    --configure)
+      CONFIGURE=1
+      PICK=1
+      shift
+      ;;
+    --refresh)
+      REFRESH=1
+      shift
+      ;;
+    --workspace-id)
+      WORKSPACE_ID="${2:?}"
+      shift 2
+      ;;
+    --project-id)
+      PROJECT_ID="${2-}"
+      PROJECT_ID_SET=1
+      shift 2
+      ;;
+    --agent-id)
+      AGENT_ID="${2:?}"
+      shift 2
+      ;;
+    --squad-id)
+      SQUAD_ID="${2:?}"
+      shift 2
+      ;;
+    --created-by)
+      CREATED_BY_NAME="${2:?}"
+      shift 2
+      ;;
+    --attachment)
+      ATTACHMENTS+=("${2:?}")
+      shift 2
+      ;;
+    --no-notify)
+      NO_NOTIFY=1
+      shift
+      ;;
+    --)
+      shift
+      PROMPT_ARGS+=("$@")
+      break
+      ;;
+    -*)
+      mqa_die "Unknown flag: $1"
+      ;;
+    *)
+      PROMPT_ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+mqa_require_cmd multica jq curl
+mqa_ensure_dirs
+mqa_load_config
+
+# --- resolve workspace ---
+if [[ -z "$WORKSPACE_ID" ]]; then
+  WORKSPACE_ID="$(mqa_state_get last_workspace_id)"
+fi
+if [[ -z "$WORKSPACE_ID" && -n "${MQA_DEFAULT_WORKSPACE_ID:-}" ]]; then
+  WORKSPACE_ID="$MQA_DEFAULT_WORKSPACE_ID"
+fi
+
+# Bare --refresh must never open interactive pickers (Elephant warms cache this way).
+if [[ "$REFRESH" == "1" && "$CONFIGURE" != "1" && "$PICK" != "1" && ${#PROMPT_ARGS[@]} -eq 0 && -t 0 ]]; then
+  if [[ -z "$WORKSPACE_ID" ]]; then
+    # First workspace from CLI if any
+    WORKSPACE_ID="$(mqa_list_workspaces | jq -r '.[0].id // empty' 2>/dev/null || true)"
+  fi
+  if [[ -z "$WORKSPACE_ID" ]]; then
+    exit 0
+  fi
+  mqa_get_catalog "$WORKSPACE_ID" 1 >/dev/null
+  mqa_state_set last_workspace_id "$WORKSPACE_ID"
+  if [[ "$NO_NOTIFY" == "1" ]]; then
+    printf 'refreshed catalog for %s\n' "$WORKSPACE_ID"
+  fi
+  exit 0
+fi
+
+if [[ "$PICK" == "1" || -z "$WORKSPACE_ID" ]]; then
+  mapfile -t ws_lines < <(mqa_list_workspaces | mqa_workspace_lines)
+  if [[ ${#ws_lines[@]} -eq 0 ]]; then
+    mqa_die "No Multica workspaces found."
+  fi
+  if [[ ${#ws_lines[@]} -eq 1 && -z "$WORKSPACE_ID" ]]; then
+    WORKSPACE_ID="${ws_lines[0]##*$'\t'}"
+  elif [[ "$PICK" == "1" || -z "$WORKSPACE_ID" ]]; then
+    WORKSPACE_ID="$(mqa_pick_id_from_labeled "Multica workspace" "${ws_lines[@]}")" \
+      || mqa_die "Cancelled."
+  fi
+fi
+mqa_state_set last_workspace_id "$WORKSPACE_ID"
+
+# --- catalog ---
+if [[ "$REFRESH" == "1" ]]; then
+  catalog="$(mqa_get_catalog "$WORKSPACE_ID" 1)"
+else
+  catalog="$(mqa_get_catalog "$WORKSPACE_ID" 0)"
+  # Soft refresh in background for next open
+  (mqa_get_catalog "$WORKSPACE_ID" 1 >/dev/null 2>&1 || true) &
+fi
+
+# --- project ---
+if [[ "$PROJECT_ID_SET" != "1" ]]; then
+  PROJECT_ID="$(mqa_state_get "last_project_id.$WORKSPACE_ID")"
+fi
+if [[ "$PICK" == "1" ]]; then
+  mapfile -t project_lines < <(printf '%s' "$catalog" | mqa_project_lines)
+  # Optional: allow "no project" (sentinel id; never send as project_id).
+  project_lines=("— No project"$'\t'"__none__" "${project_lines[@]+"${project_lines[@]}"}")
+  picked="$(mqa_pick_id_from_labeled "Multica project (optional)" "${project_lines[@]}")" || true
+  PROJECT_ID="$(mqa_normalize_project_id "${picked:-}")"
+else
+  PROJECT_ID="$(mqa_normalize_project_id "${PROJECT_ID:-}")"
+fi
+mqa_state_set "last_project_id.$WORKSPACE_ID" "${PROJECT_ID:-}"
+
+# --- created-by (agent | squad) ---
+CREATED_BY_KIND=""
+CREATED_BY_ID=""
+CREATED_BY_NAME_RESOLVED=""
+
+if [[ -n "$AGENT_ID" ]]; then
+  CREATED_BY_KIND="agent"
+  CREATED_BY_ID="$AGENT_ID"
+elif [[ -n "$SQUAD_ID" ]]; then
+  CREATED_BY_KIND="squad"
+  CREATED_BY_ID="$SQUAD_ID"
+elif [[ -n "$CREATED_BY_NAME" ]]; then
+  match="$(
+    printf '%s' "$catalog" | jq -r --arg n "$CREATED_BY_NAME" '
+      (($n | ascii_downcase) as $q |
+        ((.agents // []) | map(select((.name // "") | ascii_downcase | contains($q))) | .[0] | select(.) | "agent\t\(.id)\t\(.name)"),
+         ((.squads // []) | map(select((.name // "") | ascii_downcase | contains($q))) | .[0] | select(.) | "squad\t\(.id)\t\(.name)"))
+      ) // empty
+    '
+  )"
+  [[ -n "$match" ]] || mqa_die "No agent/squad matching \"$CREATED_BY_NAME\""
+  IFS=$'\t' read -r CREATED_BY_KIND CREATED_BY_ID CREATED_BY_NAME_RESOLVED <<<"$match"
+else
+  last_kind="$(mqa_state_get "last_created_by_kind.$WORKSPACE_ID")"
+  last_id="$(mqa_state_get "last_created_by_id.$WORKSPACE_ID")"
+  if [[ "$PICK" == "1" || -z "$last_kind" || -z "$last_id" ]]; then
+    mapfile -t cb_lines < <(printf '%s' "$catalog" | mqa_created_by_lines)
+    [[ ${#cb_lines[@]} -gt 0 ]] || mqa_die "No agents or squads in this workspace."
+    line="$(mqa_pick_line "Send to agent / squad" "${cb_lines[@]}")" || mqa_die "Cancelled."
+    # "label\tkind\tid"
+    CREATED_BY_KIND="$(printf '%s' "$line" | cut -f2)"
+    CREATED_BY_ID="$(printf '%s' "$line" | cut -f3)"
+    CREATED_BY_NAME_RESOLVED="$(printf '%s' "$line" | cut -f1 | sed 's/^[🤖👥] //')"
+  else
+    CREATED_BY_KIND="$last_kind"
+    CREATED_BY_ID="$last_id"
+    CREATED_BY_NAME_RESOLVED="$(mqa_state_get "last_created_by_name.$WORKSPACE_ID")"
+  fi
+fi
+
+# Resolve display name if missing
+if [[ -z "$CREATED_BY_NAME_RESOLVED" ]]; then
+  CREATED_BY_NAME_RESOLVED="$(
+    printf '%s' "$catalog" | jq -r --arg k "$CREATED_BY_KIND" --arg id "$CREATED_BY_ID" '
+      if $k == "squad" then
+        ((.squads // [])[] | select(.id == $id) | .name) // $id
+      else
+        ((.agents // [])[] | select(.id == $id) | .name) // $id
+      end
+    '
+  )"
+fi
+
+mqa_state_set "last_created_by_kind.$WORKSPACE_ID" "$CREATED_BY_KIND"
+mqa_state_set "last_created_by_id.$WORKSPACE_ID" "$CREATED_BY_ID"
+mqa_state_set "last_created_by_name.$WORKSPACE_ID" "$CREATED_BY_NAME_RESOLVED"
+
+if [[ "$CONFIGURE" == "1" ]]; then
+  msg="workspace=$WORKSPACE_ID project=${PROJECT_ID:-none} → $CREATED_BY_NAME_RESOLVED"
+  if [[ "$NO_NOTIFY" == "1" ]]; then
+    printf 'configured: %s\n' "$msg"
+  else
+    mqa_notify "Multica Quick Add configured" "$msg"
+  fi
+  exit 0
+fi
+
+# --- prompt ---
+PROMPT=""
+if [[ ${#PROMPT_ARGS[@]} -gt 0 ]]; then
+  PROMPT="${PROMPT_ARGS[*]}"
+elif [[ ! -t 0 ]]; then
+  # stdin if piped
+  PROMPT="$(cat)"
+  PROMPT="$(printf '%s' "$PROMPT" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+fi
+
+if [[ -z "$PROMPT" ]]; then
+  mqa_require_cmd walker
+  hint="→ ${CREATED_BY_NAME_RESOLVED}"
+  if [[ -n "$PROJECT_ID" ]]; then
+    project_title="$(
+      printf '%s' "$catalog" | jq -r --arg id "$PROJECT_ID" \
+        '((.projects // [])[] | select(.id == $id) | .title // .name) // empty'
+    )"
+    [[ -n "$project_title" ]] && hint="$hint · $project_title"
+  fi
+  PROMPT="$(mqa_prompt_text "Describe an issue" "$hint")" || mqa_die "Cancelled."
+fi
+
+# --- attachments ---
+# Note: never use "${arr[@]:-}" — with an empty array bash iterates once with "".
+attachment_ids=()
+if ((${#ATTACHMENTS[@]} > 0)); then
+  for path in "${ATTACHMENTS[@]}"; do
+    [[ -n "$path" ]] || continue
+    [[ -f "$path" ]] || mqa_die "Attachment not found: $path"
+    id="$(mqa_upload_attachment "$WORKSPACE_ID" "$path")"
+    [[ -n "$id" ]] || mqa_die "Upload failed for $path"
+    attachment_ids+=("$id")
+  done
+fi
+
+# --- submit ---
+if ((${#attachment_ids[@]} > 0)); then
+  mqa_quick_create "$WORKSPACE_ID" "$PROMPT" "$CREATED_BY_KIND" "$CREATED_BY_ID" "${PROJECT_ID:-}" "${attachment_ids[@]}"
+else
+  mqa_quick_create "$WORKSPACE_ID" "$PROMPT" "$CREATED_BY_KIND" "$CREATED_BY_ID" "${PROJECT_ID:-}"
+fi
+if [[ "$NO_NOTIFY" == "1" ]]; then
+  printf 'sent to %s: %s\n' "$CREATED_BY_NAME_RESOLVED" "$PROMPT"
+else
+  mqa_notify "Sent to $CREATED_BY_NAME_RESOLVED" "$PROMPT"
+fi
