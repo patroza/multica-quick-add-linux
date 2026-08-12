@@ -20,8 +20,8 @@ Linux port of [tim-smart/multica-quick-add](https://github.com/tim-smart/multica
 ## Install
 
 ```sh
-git clone https://github.com/patroza/multica-quick-add-walker.git
-cd multica-quick-add-walker
+git clone https://github.com/patroza/multica-quick-add-linux.git
+cd multica-quick-add-linux
 ./install.sh
 ```
 

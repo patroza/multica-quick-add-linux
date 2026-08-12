@@ -709,7 +709,7 @@ mqa_open_panel_gtk() {
   local panel
   panel="${MQA_ROOT}/panel/gtk/multica_quick_add_panel.py"
   if [[ ! -f "$panel" ]]; then
-    panel="$HOME/pj/macs/multica-quick-add-walker/panel/gtk/multica_quick_add_panel.py"
+    panel="$HOME/pj/macs/multica-quick-add-linux/panel/gtk/multica_quick_add_panel.py"
   fi
   [[ -f "$panel" ]] || mqa_die "GTK panel not found"
   exec python3 "$panel"
