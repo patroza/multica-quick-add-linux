@@ -235,9 +235,7 @@ if [[ -n "$SET_WORKSPACE_ID" || "$SET_PROJECT" == "1" || -n "$SET_AGENT_ID" || -
   if [[ "$REOPEN_HUB" == "1" ]]; then
     mqa_reopen_hub
   fi
-  if [[ "$NO_NOTIFY" == "1" ]]; then
-    mqa_print_selection
-  fi
+  # --no-notify: stay silent and fast (panels call this on every dropdown change)
   exit 0
 fi
 

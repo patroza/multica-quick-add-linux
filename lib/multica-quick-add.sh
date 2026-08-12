@@ -107,6 +107,37 @@ mqa_ensure_dirs() {
   mkdir -p "$MQA_STATE_DIR" "$MQA_CACHE_DIR"
 }
 
+mqa_draft_path() {
+  printf '%s' "$MQA_STATE_DIR/draft.txt"
+}
+
+# Unsaved prompt text for panels (dismiss without submit).
+mqa_draft_read() {
+  local f
+  f="$(mqa_draft_path)"
+  if [[ -f "$f" ]]; then
+    cat "$f"
+  fi
+}
+
+mqa_draft_write() {
+  # stdin → draft file (empty stdin clears)
+  mqa_ensure_dirs
+  local f tmp
+  f="$(mqa_draft_path)"
+  tmp="$(mktemp)"
+  cat >"$tmp"
+  if [[ ! -s "$tmp" ]]; then
+    rm -f "$tmp" "$f"
+    return 0
+  fi
+  mv "$tmp" "$f"
+}
+
+mqa_draft_clear() {
+  rm -f "$(mqa_draft_path)"
+}
+
 mqa_load_config() {
   # Exports: MQA_SERVER_URL, MQA_TOKEN, MQA_WORKSPACE_ID (optional default)
   # Returns 0 on success, 1 if missing/invalid (no notify when used as soft check).
@@ -628,8 +659,9 @@ mqa_set_workspace() {
   mqa_state_set last_workspace_id "$id"
   # Ensure workspace bucket exists (preserve prior project/agent for this ws)
   mqa_ws_set "$id" project_id "$(mqa_ws_get "$id" project_id)"
-  # Soft background refresh — never block panel UI / set-* hot path
+  # Soft background refresh — disown so set-* exits immediately
   (mqa_get_catalog "$id" 1 >/dev/null 2>&1 || true) &
+  disown 2>/dev/null || true
 }
 
 mqa_set_project() {
