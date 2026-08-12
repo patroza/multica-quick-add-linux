@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Multica Quick Add — GTK4/Adwaita floating panel (comparison UI).
+"""Multica Quick Add — GTK4/Adwaita floating panel (gtk branch primary UI).
 
-Same Tim-style flow as the Quickshell panel: live text entry + pickers.
-Styled dark to match; optional gtk4-layer-shell when available.
+Tim-style capture: live text entry + workspace / project / created-by pickers.
+Hotkey should run `multica-quick-add --panel` (single-instance; re-invoke toggles).
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, GLib, Gtk, Pango  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 try:
     gi.require_version("Gtk4LayerShell", "1.0")
@@ -98,7 +98,6 @@ def run_json(cmd: list[str]) -> dict:
     env = os.environ.copy()
     home = Path.home()
     env["PATH"] = f"{home / '.local' / 'bin'}:{env.get('PATH', '')}"
-    # Avoid interactive BASH_ENV/direnv noise in child bash scripts
     env.pop("BASH_ENV", None)
     proc = subprocess.run(cmd, check=False, capture_output=True, text=True, env=env)
     if proc.returncode != 0:
@@ -117,7 +116,10 @@ def notify(title: str, body: str) -> None:
 
 class MulticaPanel(Adw.Application):
     def __init__(self) -> None:
-        super().__init__(application_id="dev.multica.QuickAddGtk")
+        super().__init__(
+            application_id="dev.multica.QuickAddGtk",
+            flags=Gio.ApplicationFlags.FLAGS_NONE,
+        )
         self._bootstrap: dict = {}
         self._win: Gtk.Window | None = None
         self._prompt: Gtk.TextView | None = None
@@ -126,15 +128,18 @@ class MulticaPanel(Adw.Application):
         self._created: Gtk.DropDown | None = None
         self._status: Gtk.Label | None = None
         self._send: Gtk.Button | None = None
+        self._visible = False
 
     def do_activate(self) -> None:  # noqa: N802
+        # Single-instance: re-invoking the hotkey toggles close.
         if self._win is not None:
-            self._win.present()
-            self._focus_prompt()
-            self._reload_async()
+            if self._visible:
+                self._dismiss()
+                return
+            self._present_existing()
             return
 
-        win = Gtk.Window(application=self, title="Multica Quick Add (GTK)")
+        win = Gtk.Window(application=self, title="Multica Quick Add")
         win.add_css_class("mqa")
         win.set_default_size(720, 268)
         win.set_resizable(True)
@@ -143,10 +148,12 @@ class MulticaPanel(Adw.Application):
 
         if HAS_LAYER:
             LayerShell.init_for_window(win)
-            LayerShell.set_layer(win, LayerShell.Layer.TOP)
+            LayerShell.set_layer(win, LayerShell.Layer.OVERLAY)
             LayerShell.set_anchor(win, LayerShell.Edge.TOP, True)
+            LayerShell.set_anchor(win, LayerShell.Edge.LEFT, False)
+            LayerShell.set_anchor(win, LayerShell.Edge.RIGHT, False)
             LayerShell.set_margin(win, LayerShell.Edge.TOP, 96)
-            LayerShell.set_keyboard_mode(win, LayerShell.KeyboardMode.ON_DEMAND)
+            LayerShell.set_keyboard_mode(win, LayerShell.KeyboardMode.EXCLUSIVE)
             LayerShell.set_namespace(win, "multica-quick-add")
 
         css = Gtk.CssProvider()
@@ -157,12 +164,9 @@ class MulticaPanel(Adw.Application):
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
         outer.add_css_class("mqa-panel")
-        outer.set_margin_top(18)
-        outer.set_margin_bottom(18)
-        outer.set_margin_start(18)
-        outer.set_margin_end(18)
+        for m in ("top", "bottom", "start", "end"):
+            getattr(outer, f"set_margin_{m}")(18)
 
-        # Header
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         badge = Gtk.Label(label="M")
         badge.add_css_class("mqa-badge")
@@ -171,7 +175,11 @@ class MulticaPanel(Adw.Application):
         titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         t1 = Gtk.Label(label="Quick Add", xalign=0)
         t1.add_css_class("mqa-header-title")
-        t2 = Gtk.Label(label="GTK · ⌘/Ctrl+Enter to send · Esc dismiss · Enter newline", xalign=0)
+        layer_note = "layer-shell" if HAS_LAYER else "window"
+        t2 = Gtk.Label(
+            label=f"GTK ({layer_note}) · ⌘/Ctrl+Enter send · Esc dismiss · Enter newline",
+            xalign=0,
+        )
         t2.add_css_class("mqa-header-sub")
         titles.append(t1)
         titles.append(t2)
@@ -179,7 +187,6 @@ class MulticaPanel(Adw.Application):
         header.append(titles)
         outer.append(header)
 
-        # Prompt
         frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         frame.add_css_class("mqa-prompt-frame")
         scroll = Gtk.ScrolledWindow()
@@ -225,6 +232,7 @@ class MulticaPanel(Adw.Application):
 
         win.set_child(outer)
         win.connect("close-request", self._on_close)
+        win.connect("hide", self._on_hide)
 
         self._win = win
         self._prompt = prompt
@@ -234,9 +242,25 @@ class MulticaPanel(Adw.Application):
         self._status = status
         self._send = send
 
-        win.present()
+        self._present_existing()
+
+    def _present_existing(self) -> None:
+        if not self._win:
+            return
+        self._win.present()
+        self._visible = True
         self._focus_prompt()
         self._reload_async()
+
+    def _dismiss(self) -> None:
+        if self._prompt:
+            buf = self._prompt.get_buffer()
+            buf.set_text("", -1)
+        self._set_status("", False)
+        if self._win:
+            self._win.hide()
+        self._visible = False
+        # Stay alive for fast re-toggle; quit fully if user wants clean process via Esc twice? hide is enough.
 
     def _focus_prompt(self) -> None:
         if self._prompt:
@@ -251,14 +275,16 @@ class MulticaPanel(Adw.Application):
         self._status.add_css_class("status-error" if error else "status-info")
 
     def _on_close(self, *_args) -> bool:
-        self.quit()
-        return False
+        self._dismiss()
+        return True  # prevent destroy; keep app for toggle
+
+    def _on_hide(self, *_args) -> None:
+        self._visible = False
 
     def _on_key(self, _ctrl, keyval, _keycode, state) -> bool:
         if keyval == Gdk.KEY_Escape:
-            self.quit()
+            self._dismiss()
             return True
-        # Enter = newline. Submit only with Ctrl/Cmd/Super+Enter.
         submit_mod = (
             Gdk.ModifierType.CONTROL_MASK
             | Gdk.ModifierType.META_MASK
@@ -298,6 +324,7 @@ class MulticaPanel(Adw.Application):
         squads = data.get("squads") or []
         sel = data.get("selection") or {}
 
+        assert self._ws and self._proj and self._created
         self._ws.set_model(Gtk.StringList.new([w.get("name") or w.get("id") for w in workspaces] or ["—"]))
         self._proj.set_model(
             Gtk.StringList.new(["No project"] + [p.get("title") or p.get("id") for p in projects])
@@ -339,6 +366,7 @@ class MulticaPanel(Adw.Application):
         self._focus_prompt()
 
     def _prompt_text(self) -> str:
+        assert self._prompt
         buf = self._prompt.get_buffer()
         start = buf.get_start_iter()
         end = buf.get_end_iter()
@@ -358,6 +386,7 @@ class MulticaPanel(Adw.Application):
         agents = data.get("agents") or []
         squads = data.get("squads") or []
 
+        assert self._ws and self._proj and self._created
         wi = self._ws.get_selected()
         if wi < 0 or wi >= len(workspaces):
             self._set_status("Pick a workspace", True)
@@ -418,7 +447,9 @@ class MulticaPanel(Adw.Application):
 
     def _send_ok(self, prompt: str) -> None:
         notify("Sent", prompt[:120])
-        self.quit()
+        if self._prompt:
+            self._prompt.get_buffer().set_text("", -1)
+        self._dismiss()
 
 
 def main() -> int:
